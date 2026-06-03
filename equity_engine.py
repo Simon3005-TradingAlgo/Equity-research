@@ -74,39 +74,59 @@ def _series(df, names):
 
 # ---------------------------------------------------------------- fetch
 def _fmp_profile(ticker, key):
-    """Optionaler Financial-Modeling-Prep Profil-Abruf (gratis-Tier). Gibt dict oder None."""
+    """FMP Profil-Abruf (stable zuerst, v3 als Fallback). Gibt (dict|None, status)."""
     import requests
-    try:
-        r = requests.get(f"https://financialmodelingprep.com/api/v3/profile/{ticker}",
-                         params={"apikey": key}, timeout=12)
-        j = r.json()
-        if isinstance(j, list) and j:
-            d = j[0]; lo = hi = None
-            rng = d.get("range")
-            if rng and "-" in str(rng):
-                try: lo, hi = [float(x) for x in str(rng).split("-")]
-                except Exception: pass
-            return dict(summary=d.get("description"), sector=d.get("sector"), industry=d.get("industry"),
-                        country=d.get("country"), city=d.get("city"),
-                        employees=int(d["fullTimeEmployees"]) if d.get("fullTimeEmployees") else None,
-                        website=d.get("website"), market_cap=d.get("mktCap"), beta=d.get("beta"),
-                        hi52=hi, lo52=lo, price=d.get("price"), price_ccy=d.get("currency"))
-    except Exception:
-        return None
-    return None
+    attempts = [("stable", "https://financialmodelingprep.com/stable/profile", {"symbol": ticker, "apikey": key}),
+                ("v3", f"https://financialmodelingprep.com/api/v3/profile/{ticker}", {"apikey": key})]
+    last = "kein Treffer"
+    for tag, url, params in attempts:
+        try:
+            r = requests.get(url, params=params, timeout=12)
+            if not r.ok:
+                last = f"{tag}: HTTP {r.status_code}"; continue
+            j = r.json()
+            if isinstance(j, dict) and (j.get("Error Message") or j.get("message")):
+                last = f"{tag}: {str(j.get('Error Message') or j.get('message'))[:90]}"; continue
+            if isinstance(j, list) and j:
+                d = j[0]; lo = hi = None
+                rng = d.get("range")
+                if rng and "-" in str(rng):
+                    try: lo, hi = [float(x) for x in str(rng).split("-")]
+                    except Exception: pass
+                try: emp = int(float(d["fullTimeEmployees"])) if d.get("fullTimeEmployees") else None
+                except Exception: emp = None
+                prof = dict(summary=d.get("description"), sector=d.get("sector"), industry=d.get("industry"),
+                            country=d.get("country"), city=d.get("city"), employees=emp,
+                            website=d.get("website"), market_cap=d.get("marketCap") or d.get("mktCap"),
+                            beta=d.get("beta"), hi52=hi, lo52=lo, price=d.get("price"), price_ccy=d.get("currency"))
+                return prof, f"ok ({tag})"
+            last = f"{tag}: leer"
+        except Exception as e:
+            last = f"{tag}: {type(e).__name__}"
+    return None, last
 
 def _fmp_statements(ticker, key, n=6):
-    """Optionale FMP-Jahresabschluesse (gratis: US-Abdeckung, ~5J). Gibt {fields, years} oder None."""
+    """FMP Jahresabschluesse (stable zuerst, v3 Fallback). Gibt ({fields, years}|None, status)."""
     import requests
-    base = "https://financialmodelingprep.com/api/v3"
-    def get(ep):
-        try:
-            r = requests.get(f"{base}/{ep}/{ticker}", params={"period": "annual", "limit": n, "apikey": key}, timeout=15)
-            j = r.json(); return j if isinstance(j, list) else []
-        except Exception:
-            return []
-    inc, bal, cf = get("income-statement"), get("balance-sheet-statement"), get("cash-flow-statement")
-    if not inc: return None
+    def fetch(kind):
+        attempts = [("https://financialmodelingprep.com/stable/" + kind, {"symbol": ticker, "period": "annual", "limit": n, "apikey": key}),
+                    (f"https://financialmodelingprep.com/api/v3/{kind}/{ticker}", {"period": "annual", "limit": n, "apikey": key})]
+        for url, params in attempts:
+            try:
+                r = requests.get(url, params=params, timeout=15)
+                if r.ok:
+                    j = r.json()
+                    if isinstance(j, list) and j: return j, None
+                    if isinstance(j, dict) and (j.get("Error Message") or j.get("message")):
+                        return [], str(j.get("Error Message") or j.get("message"))[:90]
+                else:
+                    return [], f"HTTP {r.status_code}"
+            except Exception as e:
+                return [], type(e).__name__
+        return [], "leer"
+    inc, msg = fetch("income-statement")
+    if not inc: return None, msg or "leer"
+    bal, _ = fetch("balance-sheet-statement"); cf, _ = fetch("cash-flow-statement")
     fields = {
         "revenue": (inc, "revenue"), "cogs": (inc, "costOfRevenue"), "ebitda": (inc, "ebitda"),
         "ebit": (inc, "operatingIncome"), "da": (inc, "depreciationAndAmortization"),
@@ -132,7 +152,7 @@ def _fmp_statements(ticker, key, n=6):
         return out
     per = {k: by_year(lst, fld) for k, (lst, fld) in fields.items()}
     allyears = sorted(set().union(*[set(d) for d in per.values()])) if per else []
-    return {"fields": per, "years": allyears}
+    return {"fields": per, "years": allyears}, "ok"
 
 def _apply_fmp_statements(data, fmp):
     """Fuellt NaN-Luecken in den Yahoo-Arrays jahresweise mit FMP-Werten. Gibt Anzahl gefuellter Zellen."""
@@ -218,9 +238,9 @@ def fetch_fundamentals(ticker, n_years=5, fmp_key=None):
                    rec_key=info.get("recommendationKey"), rec_mean=info.get("recommendationMean"))
 
     # optionaler FMP-Fallback (zuverlaessige Beschreibung/Profil + Kurs + Luecken-Fuellung Finanzdaten)
-    sources = {"profile": "Yahoo", "price": "Yahoo", "fmp_fill": 0}
+    sources = {"profile": "Yahoo", "price": "Yahoo", "fmp_fill": 0, "fmp_msg": "kein Key"}
     if fmp_key:
-        fp = _fmp_profile(ticker, fmp_key)
+        fp, pmsg = _fmp_profile(ticker, fmp_key)
         if fp:
             for kk in ("summary", "sector", "industry", "country", "city", "employees",
                        "website", "market_cap", "beta", "hi52", "lo52"):
@@ -229,8 +249,9 @@ def fetch_fundamentals(ticker, n_years=5, fmp_key=None):
             if (not price or np.isnan(price)) and fp.get("price"):
                 price = float(fp["price"]); sources["price"] = "FMP"
             if fp.get("price_ccy"): price_ccy = fp["price_ccy"]
-        fs = _fmp_statements(ticker, fmp_key, n=len(years) + 2)
+        fs, smsg = _fmp_statements(ticker, fmp_key, n=len(years) + 2)
         sources["fmp_fill"] = _apply_fmp_statements(data, fs) if fs else 0
+        sources["fmp_msg"] = f"Profil {pmsg} · Finanzdaten {smsg}"
 
     try:
         div = t.dividends
