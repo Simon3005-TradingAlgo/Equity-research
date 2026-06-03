@@ -250,8 +250,9 @@ else:
     dlc[1].error("PPT-Export fehlgeschlagen")
     st.caption(f"PPT: {ppt_err}  (pruefe, ob python-pptx und matplotlib installiert sind / Repo neu deployt)")
 
-t_comp, t_dev, t_stmt, t_val, t_fin, t_score, t_gloss = st.tabs(
-    ["Unternehmen", "Entwicklung", "Abschluesse", "Bewertung & Prognose", "Kennzahlen", "Qualitaet", "Glossar"])
+t_comp, t_dev, t_stmt, t_val, t_peer, t_fin, t_score, t_gloss = st.tabs(
+    ["Unternehmen", "Entwicklung", "Abschluesse", "Bewertung & Prognose", "Peer-Vergleich",
+     "Kennzahlen", "Qualitaet", "Glossar"])
 
 # ---------------------------------------------------- Unternehmen
 with t_comp:
@@ -443,6 +444,9 @@ with t_stmt:
                    "Klammergroessen/negative Werte: Aufwendungen und Investitionen. Free Cashflow = CFO - CapEx.")
     else:
         st.caption("Keine Abschlussdaten verfuegbar.")
+
+# ---------------------------------------------------- Bewertung & Prognose
+with t_val:
     st.markdown("**DCF-Annahmen (interaktiv - rechnet sofort)**")
     cs = st.columns(4)
     v_wacc = cs[0].slider("WACC", 0.04, 0.15, float(wacc), 0.005, format="%.3f", key="vw")
@@ -568,6 +572,88 @@ with t_stmt:
                           use_container_width=True)
     st.caption("Band = Mittelwert ± 1 Standardabweichung des Multiplikators ueber die verfuegbare Kurshistorie "
                "(annuelle Fundamentaldaten auf Tagesbasis fortgeschrieben). Aktueller Punkt = heutiger Multiplikator.")
+
+# ---------------------------------------------------- Peer-Vergleich
+with t_peer:
+    if not peer_rs:
+        st.info("Noch keine Peers ausgewaehlt. Trage links unter **Peers fuer relative Bewertung** "
+                "ein oder mehrere Ticker ein (kommagetrennt, z. B. `AAPL, GOOGL, ORCL`) und lade neu. "
+                "Der Vergleich nutzt waehrungsneutrale Kennzahlen (Margen, Renditen, Multiplikatoren, "
+                "Auf-/Abschlag, Qualitaets-Score), damit Titel unterschiedlicher Boersen vergleichbar bleiben.")
+    else:
+        allr = [main] + peer_rs
+        names = [r["ticker"] for r in allr]
+        def hv(r, k): 
+            v = r["headline"].get(k); return np.nan if v is None else v
+        def mv(r, k):
+            v = r["multiples"].get(k); return np.nan if v is None else v
+        pp = lambda v: "n/v" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v*100:.1f}%"
+        xx = lambda v: "n/v" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:.1f}x"
+
+        cols = {
+            "Qual.-Score": [round(r["conviction"], 1) for r in allr],
+            "Auf-/Abschlag": [pp(hv(r, "mos")) for r in allr],
+            "ROIC": [pp(hv(r, "roic")) for r in allr],
+            "ROIC-WACC": [pp(hv(r, "roic_wacc")) for r in allr],
+            "EBIT-Marge": [pp(hv(r, "ebit_margin")) for r in allr],
+            "Umsatz-CAGR": [pp(hv(r, "rev_cagr")) for r in allr],
+            "ND/EBITDA": [xx(hv(r, "nd_ebitda")) for r in allr],
+            "KGV": [xx(mv(r, "pe")) for r in allr],
+            "EV/EBIT": [xx(mv(r, "ev_ebit")) for r in allr],
+            "EV/EBITDA": [xx(mv(r, "ev_ebitda")) for r in allr],
+            "FCF-Rendite": [pp(mv(r, "fcf_yield")) for r in allr],
+            "Div.-Rendite": [pp(mv(r, "div_yield")) for r in allr],
+        }
+        idx = [f"▶ {n}" for n in names[:1]] + names[1:]
+        # Median-Zeile (nur Peers) fuer numerische Vergleichsgroessen
+        def med_(vals): 
+            a = [v for v in vals if not np.isnan(v)]
+            return float(np.median(a)) if a else np.nan
+        peer_only = peer_rs
+        med_row = {
+            "Qual.-Score": round(med_([r["conviction"] for r in peer_only]), 1),
+            "Auf-/Abschlag": pp(med_([hv(r, "mos") for r in peer_only])),
+            "ROIC": pp(med_([hv(r, "roic") for r in peer_only])),
+            "ROIC-WACC": pp(med_([hv(r, "roic_wacc") for r in peer_only])),
+            "EBIT-Marge": pp(med_([hv(r, "ebit_margin") for r in peer_only])),
+            "Umsatz-CAGR": pp(med_([hv(r, "rev_cagr") for r in peer_only])),
+            "ND/EBITDA": xx(med_([hv(r, "nd_ebitda") for r in peer_only])),
+            "KGV": xx(med_([mv(r, "pe") for r in peer_only])),
+            "EV/EBIT": xx(med_([mv(r, "ev_ebit") for r in peer_only])),
+            "EV/EBITDA": xx(med_([mv(r, "ev_ebitda") for r in peer_only])),
+            "FCF-Rendite": pp(med_([mv(r, "fcf_yield") for r in peer_only])),
+            "Div.-Rendite": pp(med_([mv(r, "div_yield") for r in peer_only])),
+        }
+        tab = pd.DataFrame(cols, index=idx)
+        tab.loc["Median (Peers)"] = med_row
+        st.markdown(f"**Vergleich** — ▶ {names[0]} vs. {len(peer_rs)} Peers (waehrungsneutrale Kennzahlen)")
+        st.dataframe(tab, use_container_width=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = go.Figure()
+            fig.add_bar(x=names, y=[mv(r, "pe") for r in allr], name="KGV", marker_color=NAVY)
+            fig.add_bar(x=names, y=[mv(r, "ev_ebit") for r in allr], name="EV/EBIT", marker_color=TEAL)
+            st.plotly_chart(_layout(fig, h=320, title="Bewertung (niedriger = guenstiger)"), use_container_width=True)
+        with c2:
+            fig = go.Figure()
+            fig.add_bar(x=names, y=[hv(r, "roic") for r in allr], name="ROIC", marker_color=GREEN)
+            fig.add_bar(x=names, y=[hv(r, "ebit_margin") for r in allr], name="EBIT-Marge", marker_color=AMBER)
+            fig.update_yaxes(tickformat=".0%")
+            st.plotly_chart(_layout(fig, h=320, title="Profitabilitaet (hoeher = besser)"), use_container_width=True)
+
+        xs = [hv(r, "roic") for r in allr]; ys = [mv(r, "ev_ebit") for r in allr]
+        if any(not np.isnan(x) for x in xs) and any(not np.isnan(y) for y in ys):
+            fig = go.Figure(go.Scatter(x=xs, y=ys, mode="markers+text", text=names, textposition="top center",
+                                       marker=dict(size=[16] + [11] * (len(allr) - 1),
+                                                   color=[NAVY] + [TEAL] * (len(allr) - 1))))
+            fig.update_xaxes(tickformat=".0%", title="ROIC (Qualitaet)")
+            fig.update_yaxes(title="EV/EBIT (Bewertung)")
+            st.plotly_chart(_layout(fig, h=360, title="Qualitaet vs. Bewertung — unten rechts = guenstig & profitabel",
+                                    legend=False), use_container_width=True)
+        st.caption("Hauptwert mit ▶ markiert. Kennzahlen sind Verhaeltnisgroessen und damit waehrungs- und "
+                   "groessenunabhaengig vergleichbar. Absolute Kurse/Fair-Values bleiben bewusst aussen vor, "
+                   "da Peers in anderen Waehrungen notieren koennen.")
 
 # ---------------------------------------------------- Kennzahlen
 with t_fin:
