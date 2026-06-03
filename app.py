@@ -39,6 +39,7 @@ def f_eur(x, d=2): return "n/v" if x is None or (isinstance(x, float) and np.isn
 def f_int(x):      return "n/v" if not x else f"{int(x):,}"
 def row(r, n):  return r["ratios"].loc[n].values.astype(float) if n in r["ratios"].index else None
 def frow(r, n): return r["financials"].loc[n].values.astype(float) if n in r["financials"].index else None
+def _ok(x): return x is not None and not (isinstance(x, float) and np.isnan(x))
 
 # ---- lokale Bewertungsmodelle (rechnen live, ohne Netz) ----
 def dcf_value(base_fcf, net_debt, shares, wacc, growth, years, terminal, exit_mult=None, ebitda=None):
