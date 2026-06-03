@@ -400,9 +400,9 @@ def compute(data, wacc=0.08, growth=None, terminal=0.025,
         div_yield=_sdiv(L["dps"], price),
     )
 
-    # DCF (FCFF, 5J explizit + Gordon-Terminal)
+    # DCF (FCFF, 5J explizit + Gordon-Terminal) - nur bei positivem Basis-FCF aussagekraeftig
     fair = mos = np.nan; dcf = {}
-    if not np.isnan(L["fcf"]) and wacc > terminal:
+    if (not np.isnan(L["fcf"])) and L["fcf"] > 0 and wacc > terminal:
         proj = [L["fcf"] * (1 + growth) ** k for k in range(1, 6)]
         dfac = [(1 + wacc) ** -k for k in range(1, 6)]
         pv = [f * d for f, d in zip(proj, dfac)]
