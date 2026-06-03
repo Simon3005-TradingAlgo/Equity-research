@@ -166,7 +166,7 @@ def _apply_fmp_statements(data, fmp):
                 arr[i] = fy[y]; filled += 1
     return filled
 
-def fetch_fundamentals(ticker, n_years=5, fmp_key=None):
+def fetch_fundamentals(ticker, n_years=4, fmp_key=None):
     import yfinance as yf
     t = yf.Ticker(ticker)
     inc, bal, cf = t.income_stmt, t.balance_sheet, t.cashflow
@@ -253,15 +253,63 @@ def fetch_fundamentals(ticker, n_years=5, fmp_key=None):
         sources["fmp_fill"] = _apply_fmp_statements(data, fs) if fs else 0
         sources["fmp_msg"] = f"Profil {pmsg} · Finanzdaten {smsg}"
 
+    # Dividenden: Jahres-DPS + Historie (Ex-Daten) + Kennzahlen
+    div_hist, div_info = [], {}
     try:
         div = t.dividends
-        if div is not None and not div.empty and years:
-            dps = float(div[div.index.year == years[-1]].sum())
+        if div is not None and not div.empty:
+            if years: dps = float(div[div.index.year == years[-1]].sum())
+            for ix, vv in div.tail(20).items():
+                try: div_hist.append({"date": ix.strftime("%Y-%m-%d"), "year": int(ix.year), "amount": float(vv)})
+                except Exception: pass
     except Exception:
         pass
+    def _epoch(x):
+        try:
+            from datetime import datetime, timezone
+            return datetime.fromtimestamp(int(x), tz=timezone.utc).strftime("%Y-%m-%d")
+        except Exception:
+            return None
+    if info:
+        div_info = dict(yield_=info.get("dividendYield"), rate=info.get("dividendRate"),
+                        payout=info.get("payoutRatio"), avg5y=info.get("fiveYearAvgDividendYield"),
+                        ex_date=_epoch(info.get("exDividendDate")) if info.get("exDividendDate") else None,
+                        last_value=info.get("lastDividendValue"),
+                        last_date=_epoch(info.get("lastDividendDate")) if info.get("lastDividendDate") else None)
+
+    # News (robuster gegenueber altem/neuem yfinance-Format)
+    news = []
+    try:
+        for n in (t.news or [])[:10]:
+            c = n.get("content", n) if isinstance(n, dict) else {}
+            title = c.get("title") or n.get("title")
+            pub = (c.get("provider", {}) or {}).get("displayName") if isinstance(c.get("provider"), dict) else n.get("publisher")
+            link = (c.get("canonicalUrl", {}) or {}).get("url") if isinstance(c.get("canonicalUrl"), dict) else n.get("link")
+            ts = c.get("pubDate") or n.get("providerPublishTime")
+            when = None
+            if isinstance(ts, (int, float)): when = _epoch(ts)
+            elif isinstance(ts, str): when = ts[:10]
+            if title: news.append({"title": title, "publisher": pub, "link": link, "date": when})
+    except Exception:
+        news = []
+
+    # Events (kommende Termine aus calendar)
+    events = {}
+    try:
+        cal = t.calendar
+        if isinstance(cal, dict):
+            def _first(v): return v[0] if isinstance(v, (list, tuple)) and v else v
+            ed = _first(cal.get("Earnings Date"))
+            events = {"earnings": str(ed)[:10] if ed else None,
+                      "ex_div": str(_first(cal.get("Ex-Dividend Date")))[:10] if cal.get("Ex-Dividend Date") else None,
+                      "div_pay": str(_first(cal.get("Dividend Date")))[:10] if cal.get("Dividend Date") else None}
+    except Exception:
+        events = {}
+
     valid_price = price and not (isinstance(price, float) and np.isnan(price))
     data.update(name=name, currency=currency, price=float(price) if valid_price else np.nan,
-                dps=dps, profile=profile, price_ccy=price_ccy or currency, sources=sources)
+                dps=dps, profile=profile, price_ccy=price_ccy or currency, sources=sources,
+                dividends=div_hist, div_info=div_info, news=news, events=events)
     return data
 
 # ---------------------------------------------------------------- scoring
@@ -309,6 +357,7 @@ def compute(data, wacc=0.08, growth=None, terminal=0.025,
     shares = g("shares")
     cash, ca, ta = g("cash"), g("curr_assets"), g("total_assets")
     debt, cl, eq = g("total_debt"), g("curr_liab"), g("equity")
+    goodwill = g("goodwill")
     cfo = g("cfo"); capex = np.abs(g("capex")); fcf = cfo - capex
 
     gross = rev - cogs
@@ -383,6 +432,25 @@ def compute(data, wacc=0.08, growth=None, terminal=0.025,
     }, index=data["years"]).T
     rat = pd.DataFrame(R, index=data["years"]).T
 
+    yy = data["years"]
+    stmt_income = pd.DataFrame({
+        "Umsatz": rev / MM, "Herstellkosten": -cogs / MM, "Bruttogewinn": gross / MM,
+        "Abschreibungen (D&A)": da / MM, "EBITDA": ebitda / MM, "EBIT (operativ)": ebit / MM,
+        "Zinsaufwand": -interest / MM, "Vorsteuerergebnis": pretax / MM, "Ertragsteuern": -taxes / MM,
+        "Nettoergebnis": ni / MM, "EPS (verwaessert)": eps, "Aktien (Mio.)": shares / MM,
+    }, index=yy).T
+    stmt_balance = pd.DataFrame({
+        "Zahlungsmittel": cash / MM, "Umlaufvermoegen": ca / MM, "Bilanzsumme": ta / MM,
+        "Goodwill & immat. VG": goodwill / MM, "Kurzfr. Verbindlichkeiten": cl / MM,
+        "Gesamtverschuldung": debt / MM, "Nettoverschuldung": net_debt / MM,
+        "Eigenkapital": eq / MM, "Investiertes Kapital": inv_cap / MM,
+    }, index=yy).T
+    stmt_cashflow = pd.DataFrame({
+        "Operativer Cashflow (CFO)": cfo / MM, "Investitionen (CapEx)": -capex / MM,
+        "Free Cashflow": fcf / MM, "FCF je Aktie": fcf_ps,
+    }, index=yy).T
+    statements = {"income": stmt_income, "balance": stmt_balance, "cashflow": stmt_cashflow}
+
     series = dict(dates=data.get("period_dates"), eps=eps, ebit=ebit, ebitda=ebitda,
                   net_debt=net_debt, shares=shares)
 
@@ -390,6 +458,8 @@ def compute(data, wacc=0.08, growth=None, terminal=0.025,
                 price_ccy=data.get("price_ccy") or data.get("currency"),
                 sources=data.get("sources", {}),
                 years=data["years"], financials=fin, ratios=rat, latest=L, multiples=mult,
+                statements=statements, dividends=data.get("dividends", []),
+                div_info=data.get("div_info", {}), news=data.get("news", []), events=data.get("events", {}),
                 dcf=dcf, reverse_growth=rev_g, scores=sc, weights=WEIGHTS, series=series,
                 conviction=conv, verdict=verdict,
                 peer=dict(med_ev_ebit=np.nan, med_pe=np.nan, impl_ev_ebit=np.nan, impl_pe=np.nan),
