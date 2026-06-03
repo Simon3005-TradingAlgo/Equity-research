@@ -250,8 +250,8 @@ else:
     dlc[1].error("PPT-Export fehlgeschlagen")
     st.caption(f"PPT: {ppt_err}  (pruefe, ob python-pptx und matplotlib installiert sind / Repo neu deployt)")
 
-t_comp, t_dev, t_val, t_fin, t_score, t_gloss = st.tabs(
-    ["Unternehmen", "Entwicklung", "Bewertung & Prognose", "Kennzahlen", "Qualitaet", "Glossar"])
+t_comp, t_dev, t_stmt, t_val, t_fin, t_score, t_gloss = st.tabs(
+    ["Unternehmen", "Entwicklung", "Abschluesse", "Bewertung & Prognose", "Kennzahlen", "Qualitaet", "Glossar"])
 
 # ---------------------------------------------------- Unternehmen
 with t_comp:
@@ -314,6 +314,26 @@ with t_comp:
         st.caption(f"Datenquellen — Profil: {src.get('profile','Yahoo')}  ·  Kurs: {src.get('price','Yahoo')}  ·  "
                    f"FMP-Ergaenzungen Finanzdaten: {src.get('fmp_fill', 0)} Werte  ·  FMP-Status: {src.get('fmp_msg','-')}")
 
+    st.divider()
+    ev = main.get("events") or {}
+    if any(ev.get(k) for k in ("earnings", "ex_div", "div_pay")):
+        ec = st.columns(3)
+        ec[0].metric("Naechste Zahlen", ev.get("earnings") or "n/v")
+        ec[1].metric("Naechster Ex-Tag", ev.get("ex_div") or "n/v")
+        ec[2].metric("Naechste Zahlung", ev.get("div_pay") or "n/v")
+
+    st.markdown("**Unternehmensnews**")
+    news = main.get("news") or []
+    if news:
+        for n in news[:8]:
+            meta = " · ".join([x for x in [n.get("publisher"), n.get("date")] if x])
+            t_ = n.get("title"); link = n.get("link")
+            st.markdown(f"- {'['+t_+']('+link+')' if link else t_}" + (f"  \n  <span style='color:{GREY};font-size:0.85em'>{meta}</span>" if meta else ""),
+                        unsafe_allow_html=True)
+    else:
+        st.caption("Aktuell keine News von der Datenquelle verfuegbar (Yahoo liefert Nachrichten "
+                   "auf Cloud-IPs nicht immer; erneut laden hilft manchmal).")
+
 # ---------------------------------------------------- Entwicklung
 with t_dev:
     a, b = st.columns(2)
@@ -366,8 +386,63 @@ with t_dev:
     fig.update_yaxes(tickformat=".0%")
     gcol.plotly_chart(_layout(fig, title="Cashflow-Qualitaet"), use_container_width=True)
 
-# ---------------------------------------------------- Bewertung & Prognose
-with t_val:
+    st.divider()
+    st.markdown("**Dividende**")
+    di = main.get("div_info") or {}
+    dh = main.get("dividends") or []
+    dk = st.columns(4)
+    _dy = di.get("yield_")
+    if _dy is not None and _dy > 0.5: _dy = _dy / 100   # yfinance liefert mal Bruch, mal Prozentzahl
+    dk[0].metric("Dividendenrendite", f_pct(_dy))
+    dk[1].metric("Ausschuettungsquote", f_pct(di.get("payout")))
+    dk[2].metric("Letzter Ex-Tag", di.get("ex_date") or "n/v")
+    dk[3].metric("DPS (letztes GJ)", f_cur(main["latest"].get("dps")))
+    if dh:
+        by_year = {}
+        for d in dh:
+            by_year[d["year"]] = by_year.get(d["year"], 0) + d["amount"]
+        yrs_d = sorted(by_year)[-4:]
+        vals_d = [by_year[y] for y in yrs_d]
+        growth = [np.nan] + [(vals_d[i] / vals_d[i - 1] - 1) if vals_d[i - 1] else np.nan for i in range(1, len(vals_d))]
+        cagr_d = ((vals_d[-1] / vals_d[0]) ** (1 / (len(vals_d) - 1)) - 1) if len(vals_d) > 1 and vals_d[0] else np.nan
+        dd1, dd2 = st.columns([3, 2])
+        with dd1:
+            fig = go.Figure(go.Bar(x=[str(y) for y in yrs_d], y=vals_d, marker_color=NAVY,
+                                   text=[f"{v:.2f}" for v in vals_d], textposition="outside"))
+            st.plotly_chart(_layout(fig, h=260, title=f"Dividende je Aktie ({ccy})", legend=False), use_container_width=True)
+        with dd2:
+            st.metric("Dividenden-CAGR (Zeitraum)", f_pct(cagr_d))
+            gtab = pd.DataFrame({"DPS": [f"{v:.3f}" for v in vals_d],
+                                 "Wachstum": [f_pct(x) for x in growth]}, index=[str(y) for y in yrs_d])
+            st.table(gtab)
+        st.caption("Letzte Ausschuettungen (Ex-Tag):")
+        recent = pd.DataFrame([{"Ex-Tag": d["date"], "Betrag": f"{d['amount']:.3f} {ccy}"} for d in dh[::-1][:10]])
+        st.dataframe(recent, use_container_width=True, hide_index=True)
+    else:
+        st.caption("Keine Dividendenhistorie verfuegbar (Titel zahlt keine Dividende oder Datenquelle "
+                   "liefert sie nicht).")
+
+# ---------------------------------------------------- Abschluesse
+with t_stmt:
+    stm = main.get("statements") or {}
+    def _show_stmt(df, title):
+        st.markdown(f"**{title}** · Mio. {ccy} (sofern nicht anders angegeben), {len(main['years'])} Jahre")
+        def f_row(v, name):
+            if pd.isna(v): return "–"
+            if name.startswith("EPS") or name.startswith("FCF je") or name.startswith("Aktien"):
+                return f"{v:,.2f}"
+            return f"{v:,.0f}"
+        disp = df.apply(lambda r: [f_row(v, r.name) for v in r], axis=1, result_type="expand")
+        disp.columns = df.columns
+        st.dataframe(disp, use_container_width=True)
+    if stm:
+        _show_stmt(stm["income"], "Gewinn- und Verlustrechnung (Income Statement)")
+        _show_stmt(stm["balance"], "Bilanz (Balance Sheet)")
+        _show_stmt(stm["cashflow"], "Kapitalflussrechnung (Cash Flow)")
+        st.caption("Standardisierte Darstellung aus Yahoo-Daten (bei US-Titeln durch FMP ergaenzt). "
+                   "Klammergroessen/negative Werte: Aufwendungen und Investitionen. Free Cashflow = CFO - CapEx.")
+    else:
+        st.caption("Keine Abschlussdaten verfuegbar.")
     st.markdown("**DCF-Annahmen (interaktiv - rechnet sofort)**")
     cs = st.columns(4)
     v_wacc = cs[0].slider("WACC", 0.04, 0.15, float(wacc), 0.005, format="%.3f", key="vw")
