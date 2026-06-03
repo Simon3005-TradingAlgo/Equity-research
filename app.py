@@ -11,9 +11,11 @@ rechnen live ohne erneuten Abruf.
 import numpy as np
 import pandas as pd
 import streamlit as st
+import io
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import equity_engine as eng
+import report
 
 st.set_page_config(page_title="Equity Research Dashboard", layout="wide")
 st.markdown("<style>#MainMenu{visibility:hidden}footer{visibility:hidden}"
@@ -79,6 +81,35 @@ st.title("Equity Research Dashboard")
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_one(tk): return eng.fetch_fundamentals(tk)
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def fetch_history(tk):
+    import yfinance as yf
+    hh = yf.Ticker(tk).history(period="max", interval="1d")
+    if hh is None or hh.empty: return None
+    hh = hh[["Close"]].dropna()
+    try: hh.index = hh.index.tz_localize(None)
+    except (TypeError, AttributeError): pass
+    return hh
+
+def _ffill_to(index, dates, vals):
+    s = pd.Series(np.asarray(vals, float), index=pd.DatetimeIndex(dates)).sort_index()
+    s = s[~s.index.duplicated(keep="last")]
+    return s.reindex(index.union(s.index)).sort_index().ffill().reindex(index)
+
+def valuation_band(hist, series, kind):
+    if hist is None or series is None or series.get("dates") is None: return None
+    idx, close = hist.index, hist["Close"]
+    if kind == "pe":
+        eps_ff = _ffill_to(idx, series["dates"], series["eps"])
+        mult = close / eps_ff.where(eps_ff > 0)
+    else:
+        sh = _ffill_to(idx, series["dates"], series["shares"])
+        nd = _ffill_to(idx, series["dates"], series["net_debt"])
+        eb = _ffill_to(idx, series["dates"], series["ebit"])
+        mult = (close * sh + nd) / eb.where(eb > 0)
+    mult = mult.replace([np.inf, -np.inf], np.nan).dropna()
+    return mult if len(mult) > 30 else None
+
 if run:
     st.session_state.active = dict(ticker=ticker.strip(),
                                    peers=[p.strip() for p in peers.replace(";", ",").split(",") if p.strip()])
@@ -124,6 +155,21 @@ def med(vals):
 peer_evebit = med([r["multiples"]["ev_ebit"] for r in peer_rs])
 peer_pe = med([r["multiples"]["pe"] for r in peer_rs])
 
+# Analystenkonsens + Blended Fair Value (fuer Kopf/Export)
+prof = main.get("profile") or {}
+consensus = dict(target_mean=prof.get("target_mean"), target_high=prof.get("target_high"),
+                 target_low=prof.get("target_low"), n_analysts=prof.get("n_analysts"),
+                 rec_key=prof.get("rec_key"), rec_mean=prof.get("rec_mean"))
+_g_used = float(d.get("growth", 0.04)) if d else 0.04
+_ddm_rep = (dps_l * (1 + min(_g_used, 0.04)) / (wacc - min(_g_used, 0.04))
+            if dps_l and not np.isnan(dps_l) and dps_l > 0 and wacc > min(_g_used, 0.04) else np.nan)
+_methods_rep = [h["fair_value"], _ddm_rep]
+if peer_rs:
+    _methods_rep += [(peer_evebit * main["latest"]["ebit"] - nd_abs) / shares if shares and not np.isnan(peer_evebit) else np.nan,
+                     peer_pe * eps_l if not np.isnan(peer_pe) else np.nan]
+_methods_rep = [v for v in _methods_rep if v is not None and not np.isnan(v)]
+blended_report = float(np.median(_methods_rep)) if _methods_rep else np.nan
+
 # ================================================================ Kopf
 c1, c2 = st.columns([3, 2])
 with c1:
@@ -157,15 +203,44 @@ r3[2].metric("EV / EBIT", f_x(m["ev_ebit"]))
 r3[3].metric("FCF-Rendite", f_pct(m["fcf_yield"]))
 
 eng.to_excel([main] + peer_rs, "Equity_Analyse.xlsx")
+dlc = st.columns(2)
 with open("Equity_Analyse.xlsx", "rb") as fh:
-    st.download_button("Excel-Bericht herunterladen", fh.read(), file_name=f"Equity_{main['ticker']}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    dlc[0].download_button("Excel-Bericht herunterladen", fh.read(), file_name=f"Equity_{main['ticker']}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True)
+if dlc[1].button("PPT-Bericht erstellen", use_container_width=True):
+    st.session_state.pptx = report.build_pptx(main, h["fair_value"], h["mos"], blended_report, consensus)
+    st.session_state.pptx_tk = main["ticker"]
+if st.session_state.get("pptx") and st.session_state.get("pptx_tk") == main["ticker"]:
+    st.download_button("PPT herunterladen", st.session_state.pptx, file_name=f"Equity_{main['ticker']}.pptx",
+                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
 
 t_comp, t_dev, t_val, t_fin, t_score, t_gloss = st.tabs(
     ["Unternehmen", "Entwicklung", "Bewertung & Prognose", "Kennzahlen", "Scorecard", "Glossar"])
 
 # ---------------------------------------------------- Unternehmen
 with t_comp:
+    hist = fetch_history(act["ticker"])
+    if hist is not None and not hist.empty:
+        oc = st.columns([1, 1, 2])
+        ma50 = oc[0].checkbox("MA50", True)
+        ma200 = oc[1].checkbox("MA200", True)
+        span = oc[2].selectbox("Zeitraum", ["Max", "10 Jahre", "5 Jahre", "1 Jahr"], index=0)
+        close = hist["Close"]
+        ma50s, ma200s = close.rolling(50).mean(), close.rolling(200).mean()
+        if span != "Max":
+            n = {"10 Jahre": 10, "5 Jahre": 5, "1 Jahr": 1}[span]
+            cut = close.index.max() - pd.DateOffset(years=n)
+            mask = close.index >= cut
+            close, ma50s, ma200s = close[mask], ma50s[mask], ma200s[mask]
+        fig = go.Figure()
+        fig.add_scatter(x=close.index, y=close.values, name="Kurs", line=dict(color=NAVY, width=1.6))
+        if ma50: fig.add_scatter(x=ma50s.index, y=ma50s.values, name="MA50", line=dict(color=TEAL, width=1.3))
+        if ma200: fig.add_scatter(x=ma200s.index, y=ma200s.values, name="MA200", line=dict(color=AMBER, width=1.3))
+        st.plotly_chart(_layout(fig, h=340, title=f"Kursverlauf ({main['currency']})"), use_container_width=True)
+    else:
+        st.caption("Keine Kurshistorie verfuegbar (Yahoo zeitweise instabil - erneut laden).")
+
     p = main.get("profile") or {}
     facts = pd.DataFrame({"Angabe": [
         p.get("sector") or "n/v", p.get("industry") or "n/v",
@@ -322,6 +397,8 @@ with t_val:
 
     # Kombinierter fairer Wert
     methods = {"DCF": res["fair"], "DDM": fair_ddm, "EV/EBIT": impl_ev, "KGV": impl_pe}
+    if consensus.get("target_mean"):
+        methods["Analysten-Ziel"] = consensus["target_mean"]
     methods = {k: v for k, v in methods.items() if v is not None and not np.isnan(v)}
     blended = float(np.median(list(methods.values()))) if methods else np.nan
     s1, s2 = st.columns([3, 2])
@@ -341,6 +418,43 @@ with t_val:
     st.caption("Reverse-DCF (einstufige Naeherung): der aktuelle EV preist ein Dauerwachstum von rund "
                f"{f_pct(main['reverse_growth'])} ein. Blended = Median der oben verfuegbaren Modelle, "
                "bewusst robust gegen Ausreisser.")
+
+    st.divider()
+    st.markdown("**Analystenkonsens**")
+    if consensus.get("target_mean"):
+        ac = st.columns(5)
+        ac[0].metric("Kursziel (Mittel)", f_eur(consensus["target_mean"]),
+                     f"{(consensus['target_mean']/price-1)*100:+.0f}% vs Kurs"
+                     if price and not np.isnan(price) else None)
+        ac[1].metric("Kursziel (Hoch)", f_eur(consensus.get("target_high")))
+        ac[2].metric("Kursziel (Tief)", f_eur(consensus.get("target_low")))
+        ac[3].metric("Empfehlung", str(consensus.get("rec_key") or "n/v"))
+        ac[4].metric("Analysten", f_int(consensus.get("n_analysts")))
+    else:
+        st.caption("Keine Analystenschaetzungen von der Datenquelle verfuegbar (bei EU-Titeln oft leer; "
+                   "zuverlaessig ueber eine API mit Key).")
+
+    st.divider()
+    st.markdown("**Historische Bewertungsbaender**")
+    hist_b = fetch_history(act["ticker"])
+    bcols = st.columns(2)
+    for col_, (kind, lab) in zip(bcols, [("pe", "KGV (P/E)"), ("ev_ebit", "EV/EBIT")]):
+        mult = valuation_band(hist_b, main.get("series"), kind)
+        if mult is None:
+            col_.caption(f"{lab}: zu wenig Historie/Daten fuer ein Band.")
+            continue
+        mu, sd, cur = float(mult.mean()), float(mult.std()), float(mult.iloc[-1])
+        fig = go.Figure()
+        fig.add_scatter(x=mult.index, y=mult.values, name=lab, line=dict(color=NAVY, width=1.4))
+        fig.add_hline(y=mu, line=dict(color=GREY, width=1.5, dash="dash"),
+                      annotation_text=f"Mittel {mu:.1f}x", annotation_position="right")
+        fig.add_hrect(y0=mu - sd, y1=mu + sd, fillcolor=TEAL, opacity=0.12, line_width=0)
+        fig.add_scatter(x=[mult.index[-1]], y=[cur], mode="markers", name="aktuell",
+                        marker=dict(color=AMBER, size=10))
+        col_.plotly_chart(_layout(fig, h=300, title=f"{lab}-Band  ·  aktuell {cur:.1f}x"),
+                          use_container_width=True)
+    st.caption("Band = Mittelwert ± 1 Standardabweichung des Multiplikators ueber die verfuegbare Kurshistorie "
+               "(annuelle Fundamentaldaten auf Tagesbasis fortgeschrieben). Aktueller Punkt = heutiger Multiplikator.")
 
 # ---------------------------------------------------- Kennzahlen
 with t_fin:
