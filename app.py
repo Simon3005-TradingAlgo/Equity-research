@@ -312,7 +312,7 @@ with t_comp:
     src = main.get("sources") or {}
     if src:
         st.caption(f"Datenquellen — Profil: {src.get('profile','Yahoo')}  ·  Kurs: {src.get('price','Yahoo')}  ·  "
-                   f"FMP-Ergaenzungen Finanzdaten: {src.get('fmp_fill', 0)} Werte gefuellt")
+                   f"FMP-Ergaenzungen Finanzdaten: {src.get('fmp_fill', 0)} Werte  ·  FMP-Status: {src.get('fmp_msg','-')}")
 
 # ---------------------------------------------------- Entwicklung
 with t_dev:
