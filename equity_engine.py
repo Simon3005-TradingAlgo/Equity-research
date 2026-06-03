@@ -98,12 +98,40 @@ def fetch_fundamentals(ticker, n_years=6):
              if _series(df, names) is not None else data["missing"].append(f"{tag}:{k}"))
         data.update(block)
 
-    name, currency, price, dps = ticker, "EUR", np.nan, np.nan
+    name, currency, dps, profile = ticker, "EUR", np.nan, {}
+
+    # robuster Kurs: fast_info -> history -> info
+    price = np.nan
+    try:
+        fi = t.fast_info
+        for k in ("last_price", "lastPrice"):
+            v = getattr(fi, k, None)
+            if v: price = float(v); break
+        if (not price or np.isnan(price)):
+            try: price = float(fi["lastPrice"])
+            except Exception: pass
+    except Exception:
+        pass
+    if not price or np.isnan(price):
+        try:
+            hist = t.history(period="5d")
+            if hist is not None and not hist.empty:
+                price = float(hist["Close"].dropna().iloc[-1])
+        except Exception:
+            pass
+
     try:
         info = t.info
         name = info.get("longName") or info.get("shortName") or ticker
         currency = info.get("financialCurrency") or info.get("currency") or "EUR"
-        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if not price or np.isnan(price):
+            price = info.get("currentPrice") or info.get("regularMarketPrice") or np.nan
+        profile = dict(summary=info.get("longBusinessSummary"), sector=info.get("sector"),
+                       industry=info.get("industry"), country=info.get("country"),
+                       city=info.get("city"), employees=info.get("fullTimeEmployees"),
+                       website=info.get("website"), market_cap=info.get("marketCap"),
+                       beta=info.get("beta"), hi52=info.get("fiftyTwoWeekHigh"),
+                       lo52=info.get("fiftyTwoWeekLow"))
     except Exception:
         pass
     try:
@@ -112,7 +140,9 @@ def fetch_fundamentals(ticker, n_years=6):
             dps = float(div[div.index.year == years[-1]].sum())
     except Exception:
         pass
-    data.update(name=name, currency=currency, price=float(price) if price else np.nan, dps=dps)
+    valid_price = price and not (isinstance(price, float) and np.isnan(price))
+    data.update(name=name, currency=currency, price=float(price) if valid_price else np.nan,
+                dps=dps, profile=profile)
     return data
 
 # ---------------------------------------------------------------- scoring
@@ -246,7 +276,7 @@ def compute(data, wacc=0.08, growth=None, terminal=0.025,
                     nd_ebitda=_last(R["Nettoverschuldung/EBITDA"]),
                     cash_conv=_last(R["Cash Conversion (CFO/NI)"]),
                     fair_value=fair, mos=mos),
-                found=data.get("found"), missing=data.get("missing"))
+                profile=data.get("profile", {}), found=data.get("found"), missing=data.get("missing"))
 
 # ---------------------------------------------------------------- analyse (multi)
 def analyse(tickers, wacc=0.08, growth=None, terminal=0.025,
