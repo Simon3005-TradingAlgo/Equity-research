@@ -73,7 +73,7 @@ def _series(df, names):
     return None
 
 # ---------------------------------------------------------------- fetch
-def fetch_fundamentals(ticker, n_years=6):
+def fetch_fundamentals(ticker, n_years=5):
     import yfinance as yf
     t = yf.Ticker(ticker)
     inc, bal, cf = t.income_stmt, t.balance_sheet, t.cashflow
@@ -120,20 +120,22 @@ def fetch_fundamentals(ticker, n_years=6):
         except Exception:
             pass
 
+    info = {}
     try:
-        info = t.info
+        info = t.info or {}
+    except Exception:
+        info = {}
+    if info:
         name = info.get("longName") or info.get("shortName") or ticker
         currency = info.get("financialCurrency") or info.get("currency") or "EUR"
         if not price or np.isnan(price):
             price = info.get("currentPrice") or info.get("regularMarketPrice") or np.nan
-        profile = dict(summary=info.get("longBusinessSummary"), sector=info.get("sector"),
-                       industry=info.get("industry"), country=info.get("country"),
-                       city=info.get("city"), employees=info.get("fullTimeEmployees"),
-                       website=info.get("website"), market_cap=info.get("marketCap"),
-                       beta=info.get("beta"), hi52=info.get("fiftyTwoWeekHigh"),
-                       lo52=info.get("fiftyTwoWeekLow"))
-    except Exception:
-        pass
+    profile = dict(summary=info.get("longBusinessSummary"), sector=info.get("sector"),
+                   industry=info.get("industry"), country=info.get("country"),
+                   city=info.get("city"), employees=info.get("fullTimeEmployees"),
+                   website=info.get("website"), market_cap=info.get("marketCap"),
+                   beta=info.get("beta"), hi52=info.get("fiftyTwoWeekHigh"),
+                   lo52=info.get("fiftyTwoWeekLow"))
     try:
         div = t.dividends
         if div is not None and not div.empty and years:
