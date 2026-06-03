@@ -75,8 +75,8 @@ with st.sidebar:
     qm = st.slider("Management / Kapitalallokation", 1, 5, 3)
     peers = st.text_input("Peers fuer relative Bewertung (optional)", "")
     run = st.button("Analyse laden / aktualisieren", type="primary", use_container_width=True)
-    st.caption("Optional: FMP_API_KEY in den Streamlit-Secrets hinterlegen fuer zuverlaessige "
-               "Unternehmensbeschreibung, Profil und Kurs.")
+    st.caption("FMP_API_KEY in den Streamlit-Secrets aktiviert die Kombination: FMP liefert "
+               "Beschreibung/Profil/Kurs und fuellt Luecken in den Finanzdaten, Yahoo bleibt Basis.")
 
 st.title("Equity Research Dashboard")
 
@@ -309,6 +309,10 @@ with t_comp:
                 "(inkl. Segmenten/Regionen) aus einer API wie Financial Modeling Prep.")
     st.caption("Segment-, Regions- und Wettbewerbsdetails sind in den Yahoo-Daten nicht strukturiert enthalten "
                "und stammen aus Geschaeftsbericht/IR. Die Beschreibung oben nennt diese oft im Fliesstext.")
+    src = main.get("sources") or {}
+    if src:
+        st.caption(f"Datenquellen — Profil: {src.get('profile','Yahoo')}  ·  Kurs: {src.get('price','Yahoo')}  ·  "
+                   f"FMP-Ergaenzungen Finanzdaten: {src.get('fmp_fill', 0)} Werte gefuellt")
 
 # ---------------------------------------------------- Entwicklung
 with t_dev:
