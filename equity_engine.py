@@ -90,7 +90,8 @@ def fetch_fundamentals(ticker, n_years=5):
                         if s is not None else np.full(len(periods), np.nan))
         return out
 
-    data = {"ticker": ticker, "years": years, "found": {}, "missing": []}
+    data = {"ticker": ticker, "years": years, "found": {}, "missing": [],
+            "period_dates": [pd.Timestamp(p) for p in periods]}
     for df, table, tag in [(inc, INC, "GUV"), (bal, BAL, "Bilanz"), (cf, CF, "Cashflow")]:
         block = grab(df, table)
         for k, names in table.items():
@@ -135,7 +136,11 @@ def fetch_fundamentals(ticker, n_years=5):
                    city=info.get("city"), employees=info.get("fullTimeEmployees"),
                    website=info.get("website"), market_cap=info.get("marketCap"),
                    beta=info.get("beta"), hi52=info.get("fiftyTwoWeekHigh"),
-                   lo52=info.get("fiftyTwoWeekLow"))
+                   lo52=info.get("fiftyTwoWeekLow"),
+                   target_mean=info.get("targetMeanPrice"), target_high=info.get("targetHighPrice"),
+                   target_low=info.get("targetLowPrice"), target_median=info.get("targetMedianPrice"),
+                   n_analysts=info.get("numberOfAnalystOpinions"),
+                   rec_key=info.get("recommendationKey"), rec_mean=info.get("recommendationMean"))
     try:
         div = t.dividends
         if div is not None and not div.empty and years:
@@ -266,9 +271,12 @@ def compute(data, wacc=0.08, growth=None, terminal=0.025,
     }, index=data["years"]).T
     rat = pd.DataFrame(R, index=data["years"]).T
 
+    series = dict(dates=data.get("period_dates"), eps=eps, ebit=ebit, ebitda=ebitda,
+                  net_debt=net_debt, shares=shares)
+
     return dict(ticker=data["ticker"], name=data.get("name"), currency=data.get("currency"),
                 years=data["years"], financials=fin, ratios=rat, latest=L, multiples=mult,
-                dcf=dcf, reverse_growth=rev_g, scores=sc, weights=WEIGHTS,
+                dcf=dcf, reverse_growth=rev_g, scores=sc, weights=WEIGHTS, series=series,
                 conviction=conv, verdict=verdict,
                 peer=dict(med_ev_ebit=np.nan, med_pe=np.nan, impl_ev_ebit=np.nan, impl_pe=np.nan),
                 headline=dict(
@@ -435,7 +443,8 @@ def _synthetic():
              total_assets=y([7800,8050,8350,8650,9000,9400]), goodwill=y([2200,2180,2160,2300,2280,2260]),
              total_debt=y([1900,1820,1760,1700,1640,1560]), curr_liab=y([1500,1560,1640,1720,1820,1920]),
              equity=y([3300,3560,3850,4180,4560,4990]), cfo=y([690,760,860,940,1040,1150]),
-             capex=y([-280,-300,-330,-360,-390,-420]), price=28.0, dps=0.88, found={}, missing=[])
+             capex=y([-280,-300,-330,-360,-390,-420]), price=28.0, dps=0.88, found={}, missing=[],
+             period_dates=[pd.Timestamp(f"{yr}-12-31") for yr in [2020,2021,2022,2023,2024,2025]])
     return d
 
 if __name__ == "__main__":
