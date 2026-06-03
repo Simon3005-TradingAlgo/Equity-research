@@ -230,9 +230,9 @@ def _artifact(key, sig, build_fn):
             st.session_state[key] = None; st.session_state[key + "_err"] = repr(ex)
     return st.session_state.get(key), st.session_state.get(key + "_err")
 
-_sig = (main["ticker"], wacc, terminal, growth, qb, qm, len(peer_rs))
+_sig = (main["ticker"], wacc, terminal, growth, qb, qm, tuple(r["ticker"] for r in peer_rs))
 xls, xls_err = _artifact("xls", _sig, lambda: excel_report.build_excel(main, peer_rs, models, blended_report, consensus, wacc))
-ppt, ppt_err = _artifact("ppt", _sig, lambda: report.build_pptx(main, models, blended_report, consensus))
+ppt, ppt_err = _artifact("ppt", _sig, lambda: report.build_pptx(main, models, blended_report, consensus, peer_rs))
 
 dlc = st.columns(2)
 if xls:
