@@ -16,6 +16,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import equity_engine as eng
 import report
+import excel_report
 
 st.set_page_config(page_title="Equity Research Dashboard", layout="wide")
 st.markdown("<style>#MainMenu{visibility:hidden}footer{visibility:hidden}"
@@ -170,6 +171,15 @@ if peer_rs:
 _methods_rep = [v for v in _methods_rep if v is not None and not np.isnan(v)]
 blended_report = float(np.median(_methods_rep)) if _methods_rep else np.nan
 
+models = {"DCF (FCFF)": h["fair_value"]}
+if not np.isnan(_ddm_rep): models["DDM (Gordon)"] = _ddm_rep
+if peer_rs:
+    models["EV/EBIT (Peer)"] = ((peer_evebit * main["latest"]["ebit"] - nd_abs) / shares
+                               if shares and not np.isnan(peer_evebit) else np.nan)
+    models["KGV (Peer)"] = peer_pe * eps_l if not np.isnan(peer_pe) else np.nan
+if consensus.get("target_mean"): models["Analysten-Ziel"] = consensus["target_mean"]
+models = {k: v for k, v in models.items() if v is not None and not np.isnan(v)}
+
 # ================================================================ Kopf
 c1, c2 = st.columns([3, 2])
 with c1:
@@ -202,18 +212,33 @@ r3[1].metric("KGV", f_x(m["pe"]))
 r3[2].metric("EV / EBIT", f_x(m["ev_ebit"]))
 r3[3].metric("FCF-Rendite", f_pct(m["fcf_yield"]))
 
-eng.to_excel([main] + peer_rs, "Equity_Analyse.xlsx")
+def _artifact(key, sig, build_fn):
+    if st.session_state.get(key + "_sig") != sig:
+        try:
+            st.session_state[key] = build_fn(); st.session_state[key + "_sig"] = sig; st.session_state[key + "_err"] = None
+        except Exception as ex:
+            st.session_state[key] = None; st.session_state[key + "_err"] = repr(ex)
+    return st.session_state.get(key), st.session_state.get(key + "_err")
+
+_sig = (main["ticker"], wacc, terminal, growth, qb, qm, len(peer_rs))
+xls, xls_err = _artifact("xls", _sig, lambda: excel_report.build_excel(main, peer_rs, models, blended_report, consensus, wacc))
+ppt, ppt_err = _artifact("ppt", _sig, lambda: report.build_pptx(main, h["fair_value"], h["mos"], blended_report, consensus))
+
 dlc = st.columns(2)
-with open("Equity_Analyse.xlsx", "rb") as fh:
-    dlc[0].download_button("Excel-Bericht herunterladen", fh.read(), file_name=f"Equity_{main['ticker']}.xlsx",
+if xls:
+    dlc[0].download_button("Excel-Bericht herunterladen", xls, file_name=f"Equity_{main['ticker']}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
-if dlc[1].button("PPT-Bericht erstellen", use_container_width=True):
-    st.session_state.pptx = report.build_pptx(main, h["fair_value"], h["mos"], blended_report, consensus)
-    st.session_state.pptx_tk = main["ticker"]
-if st.session_state.get("pptx") and st.session_state.get("pptx_tk") == main["ticker"]:
-    st.download_button("PPT herunterladen", st.session_state.pptx, file_name=f"Equity_{main['ticker']}.pptx",
-                       mime="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+else:
+    dlc[0].error("Excel-Export fehlgeschlagen")
+    st.caption(f"Excel: {xls_err}")
+if ppt:
+    dlc[1].download_button("PPT-Bericht herunterladen", ppt, file_name=f"Equity_{main['ticker']}.pptx",
+                           mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                           use_container_width=True)
+else:
+    dlc[1].error("PPT-Export fehlgeschlagen")
+    st.caption(f"PPT: {ppt_err}  (pruefe, ob python-pptx und matplotlib installiert sind / Repo neu deployt)")
 
 t_comp, t_dev, t_val, t_fin, t_score, t_gloss = st.tabs(
     ["Unternehmen", "Entwicklung", "Bewertung & Prognose", "Kennzahlen", "Scorecard", "Glossar"])
