@@ -3,7 +3,7 @@ app.py - Equity Research Dashboard (Einzeltitel)
 ================================================
 Ein Ticker rein -> Profil, Kennzahlen, Zeitreihen-Charts, interaktive Bewertung
 (DCF, Sensitivitaet, DDM, Multiplikatoren, kombinierter fairer Wert), Scorecard,
-Verdikt, Excel-Export. Daten werden einmal geladen (gecacht); Annahmen-Slider
+Qualitaets-Score, Excel-/PPT-Export. Daten werden einmal geladen (gecacht); Slider
 rechnen live ohne erneuten Abruf.
 
     streamlit run app.py
@@ -39,7 +39,6 @@ def f_eur(x, d=2): return "n/v" if x is None or (isinstance(x, float) and np.isn
 def f_int(x):      return "n/v" if not x else f"{int(x):,}"
 def row(r, n):  return r["ratios"].loc[n].values.astype(float) if n in r["ratios"].index else None
 def frow(r, n): return r["financials"].loc[n].values.astype(float) if n in r["financials"].index else None
-def vcolor(v):  return GREEN if "KAUFEN" in v else (RED if "MEIDEN" in v else AMBER)
 
 # ---- lokale Bewertungsmodelle (rechnen live, ohne Netz) ----
 def dcf_value(base_fcf, net_debt, shares, wacc, growth, years, terminal, exit_mult=None, ebitda=None):
@@ -76,11 +75,13 @@ with st.sidebar:
     qm = st.slider("Management / Kapitalallokation", 1, 5, 3)
     peers = st.text_input("Peers fuer relative Bewertung (optional)", "")
     run = st.button("Analyse laden / aktualisieren", type="primary", use_container_width=True)
+    st.caption("Optional: FMP_API_KEY in den Streamlit-Secrets hinterlegen fuer zuverlaessige "
+               "Unternehmensbeschreibung, Profil und Kurs.")
 
 st.title("Equity Research Dashboard")
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_one(tk): return eng.fetch_fundamentals(tk)
+def fetch_one(tk, fmp_key=None): return eng.fetch_fundamentals(tk, fmp_key=fmp_key)
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_history(tk):
@@ -119,11 +120,15 @@ if "active" not in st.session_state:
     st.stop()
 
 act = st.session_state.active
+try:
+    fmp_key = st.secrets.get("FMP_API_KEY")
+except Exception:
+    fmp_key = None
 raw, errors = {}, []
 with st.spinner("Lade Daten von Yahoo Finance ..."):
     for tk in [act["ticker"]] + act["peers"]:
         try:
-            raw[tk] = fetch_one(tk)
+            raw[tk] = fetch_one(tk, fmp_key)
         except Exception as ex:
             errors.append((tk, str(ex)))
 
@@ -143,6 +148,8 @@ peer_rs = [eng.compute(raw[tk], wacc=wacc, growth=growth, terminal=terminal)
 h, m, d = main["headline"], main["multiples"], main["dcf"]
 yrs = [str(y) for y in main["years"]]
 price = main["latest"]["price"]
+ccy = main.get("price_ccy") or main.get("currency") or ""
+def f_cur(x, dd=2): return "n/v" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:,.{dd}f} {ccy}"
 shares = main["latest"]["shares"]
 ebitda_l = main["latest"]["ebitda"]
 eps_l = main["latest"]["eps"]
@@ -183,16 +190,19 @@ models = {k: v for k, v in models.items() if v is not None and not np.isnan(v)}
 # ================================================================ Kopf
 c1, c2 = st.columns([3, 2])
 with c1:
-    st.markdown(f"#### {main['name']}  ·  {main['ticker']}  ·  {main['currency']}")
-    st.markdown(f"<div style='display:inline-block;padding:6px 16px;border-radius:4px;"
-                f"background:{vcolor(main['verdict'])};color:#fff;font-weight:700'>{main['verdict']}</div>"
-                f"<span style='margin-left:14px;color:{GREY}'>Conviction {main['conviction']:.1f} / 5,0</span>",
-                unsafe_allow_html=True)
+    st.markdown(f"#### {main['name']}  ·  {main['ticker']}  ·  {ccy}")
+    _vals = [v for v in models.values() if not np.isnan(v)]
+    _lo, _hi = (min(_vals), max(_vals)) if _vals else (np.nan, np.nan)
+    st.markdown(f"<span style='display:inline-block;padding:5px 14px;border-radius:4px;"
+                f"background:#EBF0F7;color:#1F3864;font-weight:700'>Qualitaets-Score "
+                f"{main['conviction']:.1f} / 5,0</span>", unsafe_allow_html=True)
+    st.caption(f"Bewertungsspanne {f_cur(_lo)} – {f_cur(_hi)}  ·  Median {f_cur(blended_report)}")
 with c2:
     v = st.columns(3)
-    v[0].metric("Aktueller Kurs", f_eur(price))
-    v[1].metric("Fair Value (DCF)", f_eur(h["fair_value"]))
-    v[2].metric("Sicherheitsmarge", f_pct(h["mos"], 0))
+    v[0].metric("Aktueller Kurs", f_cur(price))
+    v[1].metric("Fair Value (Median)", f_cur(blended_report))
+    _mos_h = (blended_report / price - 1) if price and not np.isnan(price) and not np.isnan(blended_report) else np.nan
+    v[2].metric("Auf-/Abschlag", f_pct(_mos_h, 0))
 st.divider()
 
 # KPI-Raster (4 breit -> kein Ueberlappen)
@@ -222,7 +232,7 @@ def _artifact(key, sig, build_fn):
 
 _sig = (main["ticker"], wacc, terminal, growth, qb, qm, len(peer_rs))
 xls, xls_err = _artifact("xls", _sig, lambda: excel_report.build_excel(main, peer_rs, models, blended_report, consensus, wacc))
-ppt, ppt_err = _artifact("ppt", _sig, lambda: report.build_pptx(main, h["fair_value"], h["mos"], blended_report, consensus))
+ppt, ppt_err = _artifact("ppt", _sig, lambda: report.build_pptx(main, models, blended_report, consensus))
 
 dlc = st.columns(2)
 if xls:
@@ -241,7 +251,7 @@ else:
     st.caption(f"PPT: {ppt_err}  (pruefe, ob python-pptx und matplotlib installiert sind / Repo neu deployt)")
 
 t_comp, t_dev, t_val, t_fin, t_score, t_gloss = st.tabs(
-    ["Unternehmen", "Entwicklung", "Bewertung & Prognose", "Kennzahlen", "Scorecard", "Glossar"])
+    ["Unternehmen", "Entwicklung", "Bewertung & Prognose", "Kennzahlen", "Qualitaet", "Glossar"])
 
 # ---------------------------------------------------- Unternehmen
 with t_comp:
@@ -262,7 +272,7 @@ with t_comp:
         fig.add_scatter(x=close.index, y=close.values, name="Kurs", line=dict(color=NAVY, width=1.6))
         if ma50: fig.add_scatter(x=ma50s.index, y=ma50s.values, name="MA50", line=dict(color=TEAL, width=1.3))
         if ma200: fig.add_scatter(x=ma200s.index, y=ma200s.values, name="MA200", line=dict(color=AMBER, width=1.3))
-        st.plotly_chart(_layout(fig, h=340, title=f"Kursverlauf ({main['currency']})"), use_container_width=True)
+        st.plotly_chart(_layout(fig, h=340, title=f"Kursverlauf ({ccy})"), use_container_width=True)
     else:
         st.caption("Keine Kurshistorie verfuegbar (Yahoo zeitweise instabil - erneut laden).")
 
@@ -372,8 +382,8 @@ with t_val:
 
     mc = st.columns(4)
     mc[0].metric("Enterprise Value (Mio.)", f_eur(res["ev"] / eng.MM, 0) if not np.isnan(res["ev"]) else "n/v")
-    mc[1].metric("Fair Value je Aktie", f_eur(res["fair"]))
-    mc[2].metric("Aktueller Kurs", f_eur(price))
+    mc[1].metric("Fair Value je Aktie", f_cur(res["fair"]))
+    mc[2].metric("Aktueller Kurs", f_cur(price))
     mc[3].metric("Sicherheitsmarge", f_pct(mos, 0))
 
     g1, g2 = st.columns(2)
@@ -403,22 +413,22 @@ with t_val:
         ke = st.slider("Eigenkapitalkosten (ke)", 0.04, 0.15, float(v_wacc), 0.005, format="%.3f", key="ke")
         g_div = st.slider("Dividendenwachstum", 0.0, 0.08, min(float(v_g), 0.04), 0.005, format="%.3f", key="gd")
         fair_ddm = ddm_value(dps_l, g_div, ke)
-        st.metric("DDM Fair Value", f_eur(fair_ddm))
-        st.caption(f"DPS letztes GJ: {f_eur(dps_l)}")
+        st.metric("DDM Fair Value", f_cur(fair_ddm))
+        st.caption(f"DPS letztes GJ: {f_cur(dps_l)}")
     with mcol[1]:
         st.caption("Multiplikator EV/EBIT")
         tgt_ev = st.number_input("Ziel EV/EBIT", 1.0, 60.0,
                                  round(float(peer_evebit if not np.isnan(peer_evebit) else m["ev_ebit"]), 1)
                                  if not np.isnan(m["ev_ebit"]) else 12.0, 0.5, key="tev")
         impl_ev = (tgt_ev * main["latest"]["ebit"] - nd_abs) / shares if shares else np.nan
-        st.metric("Impl. Fair Value", f_eur(impl_ev))
+        st.metric("Impl. Fair Value", f_cur(impl_ev))
     with mcol[2]:
         st.caption("Multiplikator KGV")
         tgt_pe = st.number_input("Ziel KGV", 1.0, 60.0,
                                  round(float(peer_pe if not np.isnan(peer_pe) else m["pe"]), 1)
                                  if not np.isnan(m["pe"]) else 15.0, 0.5, key="tpe")
         impl_pe = tgt_pe * eps_l if not np.isnan(eps_l) else np.nan
-        st.metric("Impl. Fair Value", f_eur(impl_pe))
+        st.metric("Impl. Fair Value", f_cur(impl_pe))
 
     # Kombinierter fairer Wert
     methods = {"DCF": res["fair"], "DDM": fair_ddm, "EV/EBIT": impl_ev, "KGV": impl_pe}
@@ -430,33 +440,32 @@ with t_val:
     with s1:
         fig = go.Figure(go.Bar(x=list(methods.values()), y=list(methods.keys()), orientation="h",
                                marker_color=[GREEN if v >= (price or 0) else RED for v in methods.values()],
-                               text=[f_eur(v) for v in methods.values()], textposition="outside"))
+                               text=[f"{v:,.1f}" for v in methods.values()], textposition="outside"))
         if price and not np.isnan(price):
             fig.add_vline(x=price, line=dict(color=NAVY, width=2, dash="dash"),
-                          annotation_text=f"Kurs {f_eur(price)}", annotation_position="top")
+                          annotation_text=f"Kurs {price:,.1f}", annotation_position="top")
         mx = max(list(methods.values()) + [price or 0]) * 1.2 if methods else 1
         fig.update_xaxes(range=[0, mx])
-        s2.metric("Fair Value (Median der Modelle)", f_eur(blended),
+        s2.metric("Fair Value (Median der Modelle)", f_cur(blended),
                   f"{(blended/price-1)*100:+.0f}% vs Kurs" if (price and not np.isnan(price) and not np.isnan(blended)) else None)
-        st.plotly_chart(_layout(fig, h=280, title="Fairer Wert je Modell vs. Kurs", legend=False),
+        st.plotly_chart(_layout(fig, h=280, title=f"Fairer Wert je Modell vs. Kurs ({ccy})", legend=False),
                         use_container_width=True)
     st.caption("Reverse-DCF (einstufige Naeherung): der aktuelle EV preist ein Dauerwachstum von rund "
                f"{f_pct(main['reverse_growth'])} ein. Blended = Median der oben verfuegbaren Modelle, "
                "bewusst robust gegen Ausreisser.")
 
     st.divider()
-    st.markdown("**Analystenkonsens**")
+    st.markdown("**Analysten-Kursziele (externe Referenz)**")
     if consensus.get("target_mean"):
-        ac = st.columns(5)
-        ac[0].metric("Kursziel (Mittel)", f_eur(consensus["target_mean"]),
+        ac = st.columns(4)
+        ac[0].metric("Kursziel (Mittel)", f_cur(consensus["target_mean"]),
                      f"{(consensus['target_mean']/price-1)*100:+.0f}% vs Kurs"
                      if price and not np.isnan(price) else None)
-        ac[1].metric("Kursziel (Hoch)", f_eur(consensus.get("target_high")))
-        ac[2].metric("Kursziel (Tief)", f_eur(consensus.get("target_low")))
-        ac[3].metric("Empfehlung", str(consensus.get("rec_key") or "n/v"))
-        ac[4].metric("Analysten", f_int(consensus.get("n_analysts")))
+        ac[1].metric("Kursziel (Hoch)", f_cur(consensus.get("target_high")))
+        ac[2].metric("Kursziel (Tief)", f_cur(consensus.get("target_low")))
+        ac[3].metric("Anzahl Analysten", f_int(consensus.get("n_analysts")))
     else:
-        st.caption("Keine Analystenschaetzungen von der Datenquelle verfuegbar (bei EU-Titeln oft leer; "
+        st.caption("Keine Analysten-Kursziele von der Datenquelle verfuegbar (bei EU-Titeln oft leer; "
                    "zuverlaessig ueber eine API mit Key).")
 
     st.divider()
@@ -493,28 +502,26 @@ with t_fin:
     disp.columns = main["ratios"].columns
     st.dataframe(disp, use_container_width=True)
 
-# ---------------------------------------------------- Scorecard
+# ---------------------------------------------------- Qualitaet
 with t_score:
     labels = dict(geschaeftsmodell="Geschaeftsmodell*", management="Management*", wachstum="Wachstum",
                   profitabilitaet="Profitabilitaet (ROIC>WACC)", bilanz="Bilanz & Verschuldung",
-                  cashflow="Cashflow-Qualitaet", margen="Margen", bewertung="Bewertung & Marge")
+                  cashflow="Cashflow-Qualitaet", margen="Margen", bewertung="Bewertung (Niveau)")
     order = list(main["weights"].keys())
     sc = [main["scores"][k] for k in order]
     fig = go.Figure(go.Bar(x=sc, y=[labels[k] for k in order], orientation="h",
                            marker_color=NAVY, text=sc, textposition="outside"))
     fig.update_xaxes(range=[0, 5.5])
-    st.plotly_chart(_layout(fig, h=360, title="Scores je Kriterium (1-5)", legend=False), use_container_width=True)
+    st.plotly_chart(_layout(fig, h=360, title="Qualitaets-Scores je Kriterium (1-5)", legend=False), use_container_width=True)
     sc_df = pd.DataFrame({"Gewicht": [f_pct(main["weights"][k], 0) for k in order],
                           "Score": [main["scores"][k] for k in order],
                           "Beitrag": [round(main["weights"][k] * main["scores"][k], 2) for k in order]},
                          index=[labels[k] for k in order])
     st.table(sc_df)
-    st.markdown(f"**Conviction-Score: {main['conviction']:.1f} / 5,0**  ·  Verdikt: "
-                f"<span style='color:{vcolor(main['verdict'])};font-weight:700'>{main['verdict']}</span>",
-                unsafe_allow_html=True)
-    st.caption("* Geschaeftsmodell & Management sind qualitativ (Slider links). Verdikt-Regel: "
-               "Kaufen = Score >= 3,5 und Marge >= 20%; Halten = Score >= 3 und Marge >= 0; "
-               "Meiden = Score < 2,5 oder Marge <= -10%.")
+    st.markdown(f"**Qualitaets-Score (gewichtet): {main['conviction']:.1f} / 5,0**")
+    st.caption("Der Qualitaets-Score bewertet ausschliesslich fundamentale Merkmale (Profitabilitaet, Bilanz, "
+               "Cashflow, Wachstum, Bewertungsniveau). Er ist eine Einordnung der Unternehmensqualitaet, keine "
+               "Kauf- oder Verkaufsempfehlung. * Geschaeftsmodell & Management qualitativ (Slider links).")
 
 # ---------------------------------------------------- Glossar
 with t_gloss:
@@ -570,9 +577,10 @@ with t_gloss:
             ("Sicherheitsmarge", "Fair Value / Kurs - 1 - Puffer zwischen Schaetzung und Marktpreis."),
             ("CAGR", "Durchschnittliche jaehrliche Wachstumsrate ueber die Periode."),
         ],
-        "Scoring & Verdikt": [
-            ("Conviction-Score", "Gewichteter Mittelwert der sieben Kriterien (Skala 1-5)."),
-            ("Verdikt-Regel", "Kaufen = Score >= 3,5 und Marge >= 20%; Halten = Score >= 3 und Marge >= 0; Meiden = Score < 2,5 oder Marge <= -10%."),
+        "Qualitaets-Score": [
+            ("Qualitaets-Score", "Gewichteter Mittelwert von sieben fundamentalen Kriterien (Skala 1-5). "
+                                 "Einordnung der Unternehmensqualitaet, keine Kauf-/Verkaufsempfehlung."),
+            ("Bewertungsspanne", "Minimum bis Maximum der fairen Werte ueber alle Methoden; Median als zentrale Schaetzung."),
         ],
     }
     for grp, items in glossar.items():
