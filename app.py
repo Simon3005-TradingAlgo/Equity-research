@@ -161,8 +161,8 @@ with open("Equity_Analyse.xlsx", "rb") as fh:
     st.download_button("Excel-Bericht herunterladen", fh.read(), file_name=f"Equity_{main['ticker']}.xlsx",
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-t_comp, t_dev, t_val, t_fin, t_score = st.tabs(
-    ["Unternehmen", "Entwicklung", "Bewertung & Prognose", "Kennzahlen", "Scorecard"])
+t_comp, t_dev, t_val, t_fin, t_score, t_gloss = st.tabs(
+    ["Unternehmen", "Entwicklung", "Bewertung & Prognose", "Kennzahlen", "Scorecard", "Glossar"])
 
 # ---------------------------------------------------- Unternehmen
 with t_comp:
@@ -190,7 +190,13 @@ with t_comp:
             fig.update_yaxes(visible=False, range=[-1, 1])
             st.plotly_chart(_layout(fig, h=150, title="52-Wochen-Spanne", legend=False), use_container_width=True)
     st.markdown("**Geschaeftsbeschreibung**")
-    st.write(p.get("summary") or "Keine Beschreibung von der Datenquelle verfuegbar.")
+    summary = p.get("summary")
+    if summary:
+        st.write(summary)
+    else:
+        st.info("Aktuell keine Beschreibung von Yahoo verfuegbar. Das Profil-Feld ist auf geteilten "
+                "Cloud-IPs oft leer - erneutes Laden hilft manchmal. Zuverlaessig kommt das Profil "
+                "(inkl. Segmenten/Regionen) aus einer API wie Financial Modeling Prep.")
     st.caption("Segment-, Regions- und Wettbewerbsdetails sind in den Yahoo-Daten nicht strukturiert enthalten "
                "und stammen aus Geschaeftsbericht/IR. Die Beschreibung oben nennt diese oft im Fliesstext.")
 
@@ -370,6 +376,69 @@ with t_score:
     st.caption("* Geschaeftsmodell & Management sind qualitativ (Slider links). Verdikt-Regel: "
                "Kaufen = Score >= 3,5 und Marge >= 20%; Halten = Score >= 3 und Marge >= 0; "
                "Meiden = Score < 2,5 oder Marge <= -10%.")
+
+# ---------------------------------------------------- Glossar
+with t_gloss:
+    st.markdown("Erklaerung aller im Dashboard verwendeten Werte und Kennzahlen.")
+    glossar = {
+        "Margen & Rentabilitaet": [
+            ("Bruttomarge", "Bruttogewinn / Umsatz - Umsatzanteil nach Herstellkosten."),
+            ("EBITDA-Marge", "EBITDA / Umsatz - operative Marge vor Abschreibungen."),
+            ("EBIT-Marge", "EBIT / Umsatz - operative Marge nach Abschreibungen."),
+            ("Nettomarge", "Nettoergebnis / Umsatz - was nach allen Kosten und Steuern bleibt."),
+            ("FCF-Marge", "Free Cashflow / Umsatz - wie viel Umsatz zu freiem Cash wird."),
+        ],
+        "Kapitalrendite & Wertschoepfung": [
+            ("ROE", "Nettoergebnis / Eigenkapital - Rendite auf das Eigenkapital."),
+            ("ROA", "Nettoergebnis / Bilanzsumme - Rendite auf die Aktiva."),
+            ("NOPAT", "EBIT x (1 - Steuersatz) - operativer Nachsteuergewinn ohne Finanzierungseffekt."),
+            ("Investiertes Kapital", "Finanzschulden + Eigenkapital - liquide Mittel."),
+            ("ROIC", "NOPAT / investiertes Kapital - Rendite auf das eingesetzte Kapital."),
+            ("WACC", "Gewichtete Kapitalkosten - Mindestrendite, die Kapitalgeber erwarten."),
+            ("ROIC - WACC (Spread)", "Wertschoepfung: positiv = verdient mehr als die Kapitalkosten."),
+        ],
+        "DuPont (ROE-Zerlegung)": [
+            ("DuPont", "Nettomarge x Kapitalumschlag x EK-Multiplikator = ROE."),
+            ("Kapitalumschlag", "Umsatz / Bilanzsumme - wie effizient Aktiva Umsatz erzeugen."),
+            ("EK-Multiplikator", "Bilanzsumme / Eigenkapital - finanzieller Hebel."),
+        ],
+        "Cashflow-Qualitaet": [
+            ("Cash Conversion (CFO/NI)", "Operativer Cashflow / Nettoergebnis - nahe/ueber 100% = Gewinne durch Cash gedeckt."),
+            ("FCF / NI", "Free Cashflow / Nettoergebnis."),
+            ("Accruals-Ratio", "(Nettoergebnis - operativer Cashflow) / Bilanzsumme - hoch = Gewinn stark abgegrenzt (Warnsignal)."),
+        ],
+        "Verschuldung & Solvenz": [
+            ("Nettoverschuldung", "Finanzschulden - liquide Mittel."),
+            ("Net Debt / EBITDA", "Verschuldung relativ zum operativen Ergebnis - niedriger = solider."),
+            ("Zinsdeckung", "EBIT / Zinsaufwand - wie oft die Zinsen verdient werden."),
+            ("Verschuldungsgrad", "Schulden / Eigenkapital."),
+            ("Current Ratio", "Kurzfristige Aktiva / kurzfristige Passiva - kurzfristige Liquiditaet."),
+        ],
+        "Bewertungs-Multiplikatoren": [
+            ("Enterprise Value (EV)", "Marktkapitalisierung + Nettoverschuldung - Wert des Gesamtunternehmens."),
+            ("KGV (P/E)", "Kurs / Gewinn je Aktie."),
+            ("EV / EBIT, EV / EBITDA, EV / FCF", "EV relativ zu operativen Groessen - kapitalstrukturneutral."),
+            ("KBV (P/B)", "Kurs / Buchwert je Aktie."),
+            ("FCF-Rendite", "Free Cashflow / Marktkapitalisierung."),
+            ("Dividendenrendite", "Dividende je Aktie / Kurs."),
+        ],
+        "Bewertungsmodelle": [
+            ("DCF (FCFF)", "Barwert kuenftiger freier Cashflows; Fair Value = (Summe Barwerte + Terminalwert) - Nettoverschuldung, je Aktie."),
+            ("Terminalwert (Gordon)", "Letzter FCF x (1+g) / (WACC - g) - ewiges Wachstum."),
+            ("Terminalwert (Exit-Multiple)", "EV/EBITDA-Multiplikator auf das Endjahres-EBITDA."),
+            ("Reverse-DCF", "Welches Dauerwachstum der aktuelle Kurs bereits einpreist (Disziplin-Check)."),
+            ("DDM (Gordon)", "Dividende x (1+g) / (ke - g) - Bewertung ueber Dividenden."),
+            ("Sicherheitsmarge", "Fair Value / Kurs - 1 - Puffer zwischen Schaetzung und Marktpreis."),
+            ("CAGR", "Durchschnittliche jaehrliche Wachstumsrate ueber die Periode."),
+        ],
+        "Scoring & Verdikt": [
+            ("Conviction-Score", "Gewichteter Mittelwert der sieben Kriterien (Skala 1-5)."),
+            ("Verdikt-Regel", "Kaufen = Score >= 3,5 und Marge >= 20%; Halten = Score >= 3 und Marge >= 0; Meiden = Score < 2,5 oder Marge <= -10%."),
+        ],
+    }
+    for grp, items in glossar.items():
+        with st.expander(grp, expanded=(grp == "Kapitalrendite & Wertschoepfung")):
+            st.table(pd.DataFrame({"Erklaerung": [e for _, e in items]}, index=[b for b, _ in items]))
 
 if main["missing"]:
     st.warning("Nicht gefundene Posten (gegen Geschaeftsbericht pruefen): " + ", ".join(main["missing"]))
