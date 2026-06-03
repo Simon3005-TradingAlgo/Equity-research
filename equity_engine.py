@@ -95,6 +95,57 @@ def _fmp_profile(ticker, key):
         return None
     return None
 
+def _fmp_statements(ticker, key, n=6):
+    """Optionale FMP-Jahresabschluesse (gratis: US-Abdeckung, ~5J). Gibt {fields, years} oder None."""
+    import requests
+    base = "https://financialmodelingprep.com/api/v3"
+    def get(ep):
+        try:
+            r = requests.get(f"{base}/{ep}/{ticker}", params={"period": "annual", "limit": n, "apikey": key}, timeout=15)
+            j = r.json(); return j if isinstance(j, list) else []
+        except Exception:
+            return []
+    inc, bal, cf = get("income-statement"), get("balance-sheet-statement"), get("cash-flow-statement")
+    if not inc: return None
+    fields = {
+        "revenue": (inc, "revenue"), "cogs": (inc, "costOfRevenue"), "ebitda": (inc, "ebitda"),
+        "ebit": (inc, "operatingIncome"), "da": (inc, "depreciationAndAmortization"),
+        "interest": (inc, "interestExpense"), "taxes": (inc, "incomeTaxExpense"),
+        "pretax": (inc, "incomeBeforeTax"), "net_income": (inc, "netIncome"),
+        "shares": (inc, "weightedAverageShsOutDil"),
+        "cash": (bal, "cashAndCashEquivalents"), "curr_assets": (bal, "totalCurrentAssets"),
+        "total_assets": (bal, "totalAssets"), "goodwill": (bal, "goodwillAndIntangibleAssets"),
+        "total_debt": (bal, "totalDebt"), "curr_liab": (bal, "totalCurrentLiabilities"),
+        "equity": (bal, "totalStockholdersEquity"),
+        "cfo": (cf, "operatingCashFlow"), "capex": (cf, "capitalExpenditure"),
+    }
+    def by_year(lst, fld):
+        out = {}
+        for r in lst:
+            y = r.get("calendarYear") or str(r.get("date", ""))[:4]
+            try: y = int(y)
+            except Exception: continue
+            v = r.get(fld)
+            if v is not None:
+                try: out[y] = float(v)
+                except Exception: pass
+        return out
+    per = {k: by_year(lst, fld) for k, (lst, fld) in fields.items()}
+    allyears = sorted(set().union(*[set(d) for d in per.values()])) if per else []
+    return {"fields": per, "years": allyears}
+
+def _apply_fmp_statements(data, fmp):
+    """Fuellt NaN-Luecken in den Yahoo-Arrays jahresweise mit FMP-Werten. Gibt Anzahl gefuellter Zellen."""
+    if not fmp: return 0
+    years = data.get("years", []); filled = 0
+    for k, fy in fmp["fields"].items():
+        arr = data.get(k)
+        if arr is None or not fy: continue
+        for i, y in enumerate(years):
+            if i < len(arr) and np.isnan(arr[i]) and y in fy:
+                arr[i] = fy[y]; filled += 1
+    return filled
+
 def fetch_fundamentals(ticker, n_years=5, fmp_key=None):
     import yfinance as yf
     t = yf.Ticker(ticker)
@@ -166,15 +217,20 @@ def fetch_fundamentals(ticker, n_years=5, fmp_key=None):
                    n_analysts=info.get("numberOfAnalystOpinions"),
                    rec_key=info.get("recommendationKey"), rec_mean=info.get("recommendationMean"))
 
-    # optionaler FMP-Fallback (zuverlaessige Beschreibung/Profil + Kurs)
+    # optionaler FMP-Fallback (zuverlaessige Beschreibung/Profil + Kurs + Luecken-Fuellung Finanzdaten)
+    sources = {"profile": "Yahoo", "price": "Yahoo", "fmp_fill": 0}
     if fmp_key:
         fp = _fmp_profile(ticker, fmp_key)
         if fp:
             for kk in ("summary", "sector", "industry", "country", "city", "employees",
                        "website", "market_cap", "beta", "hi52", "lo52"):
                 if fp.get(kk): profile[kk] = fp[kk]
-            if (not price or np.isnan(price)) and fp.get("price"): price = float(fp["price"])
+            if fp.get("summary"): sources["profile"] = "FMP"
+            if (not price or np.isnan(price)) and fp.get("price"):
+                price = float(fp["price"]); sources["price"] = "FMP"
             if fp.get("price_ccy"): price_ccy = fp["price_ccy"]
+        fs = _fmp_statements(ticker, fmp_key, n=len(years) + 2)
+        sources["fmp_fill"] = _apply_fmp_statements(data, fs) if fs else 0
 
     try:
         div = t.dividends
@@ -184,7 +240,7 @@ def fetch_fundamentals(ticker, n_years=5, fmp_key=None):
         pass
     valid_price = price and not (isinstance(price, float) and np.isnan(price))
     data.update(name=name, currency=currency, price=float(price) if valid_price else np.nan,
-                dps=dps, profile=profile, price_ccy=price_ccy or currency)
+                dps=dps, profile=profile, price_ccy=price_ccy or currency, sources=sources)
     return data
 
 # ---------------------------------------------------------------- scoring
@@ -311,6 +367,7 @@ def compute(data, wacc=0.08, growth=None, terminal=0.025,
 
     return dict(ticker=data["ticker"], name=data.get("name"), currency=data.get("currency"),
                 price_ccy=data.get("price_ccy") or data.get("currency"),
+                sources=data.get("sources", {}),
                 years=data["years"], financials=fin, ratios=rat, latest=L, multiples=mult,
                 dcf=dcf, reverse_growth=rev_g, scores=sc, weights=WEIGHTS, series=series,
                 conviction=conv, verdict=verdict,
