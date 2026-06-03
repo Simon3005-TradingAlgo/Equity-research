@@ -171,19 +171,26 @@ consensus = dict(target_mean=prof.get("target_mean"), target_high=prof.get("targ
 _g_used = float(d.get("growth", 0.04)) if d else 0.04
 _ddm_rep = (dps_l * (1 + min(_g_used, 0.04)) / (wacc - min(_g_used, 0.04))
             if dps_l and not np.isnan(dps_l) and dps_l > 0 and wacc > min(_g_used, 0.04) else np.nan)
+# Aussagekraft-Flags: bei negativen Basisgroessen sind DCF/Gewinnmultiplikatoren nicht sinnvoll
+ebit_l = main["latest"]["ebit"]
+fcf_pos = bool(base_fcf and not np.isnan(base_fcf) and base_fcf > 0)
+ebit_pos = bool(ebit_l and not np.isnan(ebit_l) and ebit_l > 0)
+eps_pos = bool(eps_l and not np.isnan(eps_l) and eps_l > 0)
+
 _methods_rep = [h["fair_value"], _ddm_rep]
 if peer_rs:
-    _methods_rep += [(peer_evebit * main["latest"]["ebit"] - nd_abs) / shares if shares and not np.isnan(peer_evebit) else np.nan,
-                     peer_pe * eps_l if not np.isnan(peer_pe) else np.nan]
+    _methods_rep += [(peer_evebit * ebit_l - nd_abs) / shares if (shares and not np.isnan(peer_evebit) and ebit_pos) else np.nan,
+                     peer_pe * eps_l if (not np.isnan(peer_pe) and eps_pos) else np.nan]
 _methods_rep = [v for v in _methods_rep if v is not None and not np.isnan(v)]
 blended_report = float(np.median(_methods_rep)) if _methods_rep else np.nan
 
 models = {"DCF (FCFF)": h["fair_value"]}
 if not np.isnan(_ddm_rep): models["DDM (Gordon)"] = _ddm_rep
 if peer_rs:
-    models["EV/EBIT (Peer)"] = ((peer_evebit * main["latest"]["ebit"] - nd_abs) / shares
-                               if shares and not np.isnan(peer_evebit) else np.nan)
-    models["KGV (Peer)"] = peer_pe * eps_l if not np.isnan(peer_pe) else np.nan
+    if ebit_pos and shares and not np.isnan(peer_evebit):
+        models["EV/EBIT (Peer)"] = (peer_evebit * ebit_l - nd_abs) / shares
+    if eps_pos and not np.isnan(peer_pe):
+        models["KGV (Peer)"] = peer_pe * eps_l
 if consensus.get("target_mean"): models["Analysten-Ziel"] = consensus["target_mean"]
 models = {k: v for k, v in models.items() if v is not None and not np.isnan(v)}
 
@@ -203,6 +210,15 @@ with c2:
     v[1].metric("Fair Value (Median)", f_cur(blended_report))
     _mos_h = (blended_report / price - 1) if price and not np.isnan(price) and not np.isnan(blended_report) else np.nan
     v[2].metric("Auf-/Abschlag", f_pct(_mos_h, 0))
+
+if not (fcf_pos and ebit_pos and eps_pos):
+    _neg = [n for n, ok in [("Free Cashflow", fcf_pos), ("EBIT", ebit_pos), ("Gewinn/EPS", eps_pos)] if not ok]
+    st.warning(
+        "**Bewertung eingeschraenkt — negative Basisgroessen (" + ", ".join(_neg) + ").** "
+        "DCF und Gewinnmultiplikatoren (KGV, EV/EBIT) sind bei Verlusten bzw. negativem Cashflow nicht "
+        "aussagekraeftig und werden nicht ausgewiesen. Der branchenuebliche Weg ist eine Bewertung auf "
+        "**normalisierter** Basis — siehe Abschnitt „Normalisierung (Erholungsszenario)“ im Reiter "
+        "„Bewertung & Prognose“.")
 st.divider()
 
 # KPI-Raster (4 breit -> kein Ueberlappen)
@@ -461,6 +477,11 @@ with t_val:
         exit_mult = st.slider("Exit EV/EBITDA", 4.0, 20.0, round(default_x, 1), 0.5)
 
     res = dcf_value(base_fcf, nd_abs, shares, v_wacc, v_g, v_years, v_term, exit_mult, ebitda_l)
+    if not fcf_pos:
+        st.info("DCF nicht aussagekraeftig: Der Basis-FCF ist negativ. Bei Verlust-/Cashflow-negativen "
+                "Jahren liefert ein direkter DCF keine sinnvolle Schaetzung. Nutze den Abschnitt "
+                "**Normalisierung (Erholungsszenario)** weiter unten.")
+        res = {"fair": np.nan, "ev": np.nan, "pv": [], "pv_tv": np.nan}
     mos = (res["fair"] / price - 1) if (price and not np.isnan(price) and not np.isnan(res["fair"])) else np.nan
 
     mc = st.columns(4)
@@ -470,8 +491,7 @@ with t_val:
     mc[3].metric("Sicherheitsmarge", f_pct(mos, 0))
 
     g1, g2 = st.columns(2)
-    # Barwert-Komposition
-    if res["pv"]:
+    if fcf_pos and res["pv"]:
         labels = [f"J{k}" for k in range(1, v_years + 1)] + ["Terminal"]
         vals = [v / eng.MM for v in res["pv"]] + [res["pv_tv"] / eng.MM]
         cols = [NAVY] * v_years + [TEAL]
@@ -479,14 +499,15 @@ with t_val:
         g1.plotly_chart(_layout(fig, title="Barwert-Komposition des Enterprise Value (Mio.)", legend=False),
                         use_container_width=True)
     # Sensitivitaet WACC x Terminal
-    waccs = [round(v_wacc + x, 4) for x in (-0.01, -0.005, 0, 0.005, 0.01)]
-    terms = [round(v_term + x, 4) for x in (-0.01, -0.005, 0, 0.005, 0.01)]
-    Z = [[dcf_value(base_fcf, nd_abs, shares, w, v_g, v_years, tm)["fair"] for tm in terms] for w in waccs]
-    fig = go.Figure(go.Heatmap(z=Z, x=[f"{t*100:.1f}%" for t in terms], y=[f"{w*100:.1f}%" for w in waccs],
-                               colorscale="Blues", text=[[f_eur(v, 0) for v in r_] for r_ in Z],
-                               texttemplate="%{text}", colorbar=dict(title="Fair Value")))
-    fig.update_xaxes(title="Terminal-Wachstum"); fig.update_yaxes(title="WACC")
-    g2.plotly_chart(_layout(fig, title="Sensitivitaet: Fair Value", legend=False), use_container_width=True)
+    if fcf_pos:
+        waccs = [round(v_wacc + x, 4) for x in (-0.01, -0.005, 0, 0.005, 0.01)]
+        terms = [round(v_term + x, 4) for x in (-0.01, -0.005, 0, 0.005, 0.01)]
+        Z = [[dcf_value(base_fcf, nd_abs, shares, w, v_g, v_years, tm)["fair"] for tm in terms] for w in waccs]
+        fig = go.Figure(go.Heatmap(z=Z, x=[f"{t*100:.1f}%" for t in terms], y=[f"{w*100:.1f}%" for w in waccs],
+                                   colorscale="Blues", text=[[f_eur(v, 0) for v in r_] for r_ in Z],
+                                   texttemplate="%{text}", colorbar=dict(title="Fair Value")))
+        fig.update_xaxes(title="Terminal-Wachstum"); fig.update_yaxes(title="WACC")
+        g2.plotly_chart(_layout(fig, title="Sensitivitaet: Fair Value", legend=False), use_container_width=True)
 
     st.divider()
     st.markdown("**Weitere Bewertungsmodelle**")
@@ -502,40 +523,90 @@ with t_val:
         st.caption("Multiplikator EV/EBIT")
         tgt_ev = st.number_input("Ziel EV/EBIT", 1.0, 60.0,
                                  round(float(peer_evebit if not np.isnan(peer_evebit) else m["ev_ebit"]), 1)
-                                 if not np.isnan(m["ev_ebit"]) else 12.0, 0.5, key="tev")
-        impl_ev = (tgt_ev * main["latest"]["ebit"] - nd_abs) / shares if shares else np.nan
+                                 if not np.isnan(m["ev_ebit"]) and m["ev_ebit"] > 0 else 12.0, 0.5, key="tev")
+        impl_ev = (tgt_ev * ebit_l - nd_abs) / shares if (shares and ebit_pos) else np.nan
         st.metric("Impl. Fair Value", f_cur(impl_ev))
+        if not ebit_pos: st.caption("EBIT negativ - nicht aussagekraeftig.")
     with mcol[2]:
         st.caption("Multiplikator KGV")
         tgt_pe = st.number_input("Ziel KGV", 1.0, 60.0,
                                  round(float(peer_pe if not np.isnan(peer_pe) else m["pe"]), 1)
-                                 if not np.isnan(m["pe"]) else 15.0, 0.5, key="tpe")
-        impl_pe = tgt_pe * eps_l if not np.isnan(eps_l) else np.nan
+                                 if not np.isnan(m["pe"]) and m["pe"] > 0 else 15.0, 0.5, key="tpe")
+        impl_pe = tgt_pe * eps_l if eps_pos else np.nan
         st.metric("Impl. Fair Value", f_cur(impl_pe))
+        if not eps_pos: st.caption("Gewinn negativ - nicht aussagekraeftig.")
 
-    # Kombinierter fairer Wert
+    # Kombinierter fairer Wert (nur positive, aussagekraeftige Methoden)
     methods = {"DCF": res["fair"], "DDM": fair_ddm, "EV/EBIT": impl_ev, "KGV": impl_pe}
     if consensus.get("target_mean"):
         methods["Analysten-Ziel"] = consensus["target_mean"]
-    methods = {k: v for k, v in methods.items() if v is not None and not np.isnan(v)}
+    methods = {k: v for k, v in methods.items() if v is not None and not np.isnan(v) and v > 0}
     blended = float(np.median(list(methods.values()))) if methods else np.nan
     s1, s2 = st.columns([3, 2])
     with s1:
-        fig = go.Figure(go.Bar(x=list(methods.values()), y=list(methods.keys()), orientation="h",
-                               marker_color=[GREEN if v >= (price or 0) else RED for v in methods.values()],
-                               text=[f"{v:,.1f}" for v in methods.values()], textposition="outside"))
-        if price and not np.isnan(price):
-            fig.add_vline(x=price, line=dict(color=NAVY, width=2, dash="dash"),
-                          annotation_text=f"Kurs {price:,.1f}", annotation_position="top")
-        mx = max(list(methods.values()) + [price or 0]) * 1.2 if methods else 1
-        fig.update_xaxes(range=[0, mx])
+        if not methods:
+            st.info("Keine aussagekraeftigen (positiven) Bewertungsmethoden verfuegbar. "
+                    "Bei negativen Basisgroessen bitte die Normalisierung unten verwenden.")
+        else:
+            fig = go.Figure(go.Bar(x=list(methods.values()), y=list(methods.keys()), orientation="h",
+                                   marker_color=[GREEN if v >= (price or 0) else RED for v in methods.values()],
+                                   text=[f"{v:,.1f}" for v in methods.values()], textposition="outside"))
+            if price and not np.isnan(price):
+                fig.add_vline(x=price, line=dict(color=NAVY, width=2, dash="dash"),
+                              annotation_text=f"Kurs {price:,.1f}", annotation_position="top")
+            mx = max(list(methods.values()) + [price or 0]) * 1.2
+            fig.update_xaxes(range=[0, mx])
+            st.plotly_chart(_layout(fig, h=280, title=f"Fairer Wert je Modell vs. Kurs ({ccy})", legend=False),
+                            use_container_width=True)
         s2.metric("Fair Value (Median der Modelle)", f_cur(blended),
                   f"{(blended/price-1)*100:+.0f}% vs Kurs" if (price and not np.isnan(price) and not np.isnan(blended)) else None)
-        st.plotly_chart(_layout(fig, h=280, title=f"Fairer Wert je Modell vs. Kurs ({ccy})", legend=False),
-                        use_container_width=True)
     st.caption("Reverse-DCF (einstufige Naeherung): der aktuelle EV preist ein Dauerwachstum von rund "
                f"{f_pct(main['reverse_growth'])} ein. Blended = Median der oben verfuegbaren Modelle, "
                "bewusst robust gegen Ausreisser.")
+
+    # Normalisierung (Erholungsszenario) - branchenueblicher Weg bei Verlust-/Tiefpunkt-Jahren
+    rev_l = frow(main, "Umsatz")
+    rev_latest = rev_l[-1] * eng.MM if rev_l is not None and not np.isnan(rev_l[-1]) else np.nan
+    with st.expander("Normalisierung (Erholungsszenario) — Bewertung auf normalisierter Basis", expanded=not fcf_pos):
+        st.caption("Statt das Verlust-/Tiefpunktjahr fortzuschreiben, wird der erholte Betrieb bewertet: "
+                   "normalisierte Margen auf die aktuelle Umsatzbasis. Alle Werte sind **Annahmen**.")
+        if rev_latest is None or np.isnan(rev_latest) or not shares:
+            st.caption("Keine ausreichende Umsatz-/Aktienbasis fuer die Normalisierung verfuegbar.")
+        else:
+            ncol = st.columns(4)
+            n_ebit = ncol[0].slider("Norm. EBIT-Marge", 0.0, 0.30, 0.08, 0.005, format="%.3f", key="nebit")
+            n_fcf = ncol[1].slider("Norm. FCF-Marge", 0.0, 0.25, 0.06, 0.005, format="%.3f", key="nfcf")
+            n_g = ncol[2].slider("Erholungs-Wachstum", 0.0, 0.12, min(float(v_g), 0.05), 0.005, format="%.3f", key="ngrow")
+            n_evebit = ncol[3].number_input("Ziel EV/EBIT (norm.)", 1.0, 40.0,
+                                            round(float(peer_evebit), 1) if not np.isnan(peer_evebit) and peer_evebit > 0 else 12.0,
+                                            0.5, key="nev")
+            norm_ebit_abs = n_ebit * rev_latest
+            norm_fcf_abs = n_fcf * rev_latest
+            ev_sales = n_evebit * n_ebit  # impliziter, konsistenter EV/Sales
+            fair_ndcf = dcf_value(norm_fcf_abs, nd_abs, shares, v_wacc, n_g, v_years, v_term)["fair"]
+            fair_nevebit = (n_evebit * norm_ebit_abs - nd_abs) / shares
+            fair_nevsales = (ev_sales * rev_latest - nd_abs) / shares
+            nmethods = {"DCF (normalisiert)": fair_ndcf, "EV/EBIT (normalisiert)": fair_nevebit,
+                        f"EV/Sales ({ev_sales:.2f}x)": fair_nevsales}
+            nmethods = {k: v for k, v in nmethods.items() if _ok(v) and v > 0}
+            nblended = float(np.median(list(nmethods.values()))) if nmethods else np.nan
+            oc = st.columns(4)
+            oc[0].metric("Norm. EBIT (Mio.)", f_eur(norm_ebit_abs / eng.MM, 0))
+            oc[1].metric("Norm. FCF (Mio.)", f_eur(norm_fcf_abs / eng.MM, 0))
+            oc[2].metric("Fair Value (norm. Median)", f_cur(nblended))
+            oc[3].metric("Auf-/Abschlag", f_pct((nblended / price - 1) if price and not np.isnan(price) and _ok(nblended) else np.nan, 0))
+            if nmethods:
+                fig = go.Figure(go.Bar(x=list(nmethods.values()), y=list(nmethods.keys()), orientation="h",
+                                       marker_color=[GREEN if v >= (price or 0) else RED for v in nmethods.values()],
+                                       text=[f"{v:,.1f}" for v in nmethods.values()], textposition="outside"))
+                if price and not np.isnan(price):
+                    fig.add_vline(x=price, line=dict(color=NAVY, width=2, dash="dash"),
+                                  annotation_text=f"Kurs {price:,.1f}", annotation_position="top")
+                fig.update_xaxes(range=[0, max(list(nmethods.values()) + [price or 0]) * 1.2])
+                st.plotly_chart(_layout(fig, h=240, title=f"Normalisierte faire Werte vs. Kurs ({ccy})", legend=False),
+                                use_container_width=True)
+            st.caption("Annahmen-basiert (Erholung): EV/Sales = Ziel-EV/EBIT × norm. EBIT-Marge, auf die aktuelle "
+                       "Umsatzbasis angewandt. Keine Anlageempfehlung; die Margenannahmen setzt du selbst.")
 
     st.divider()
     st.markdown("**Analysten-Kursziele (externe Referenz)**")
