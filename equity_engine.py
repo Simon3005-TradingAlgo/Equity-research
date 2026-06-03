@@ -73,7 +73,29 @@ def _series(df, names):
     return None
 
 # ---------------------------------------------------------------- fetch
-def fetch_fundamentals(ticker, n_years=5):
+def _fmp_profile(ticker, key):
+    """Optionaler Financial-Modeling-Prep Profil-Abruf (gratis-Tier). Gibt dict oder None."""
+    import requests
+    try:
+        r = requests.get(f"https://financialmodelingprep.com/api/v3/profile/{ticker}",
+                         params={"apikey": key}, timeout=12)
+        j = r.json()
+        if isinstance(j, list) and j:
+            d = j[0]; lo = hi = None
+            rng = d.get("range")
+            if rng and "-" in str(rng):
+                try: lo, hi = [float(x) for x in str(rng).split("-")]
+                except Exception: pass
+            return dict(summary=d.get("description"), sector=d.get("sector"), industry=d.get("industry"),
+                        country=d.get("country"), city=d.get("city"),
+                        employees=int(d["fullTimeEmployees"]) if d.get("fullTimeEmployees") else None,
+                        website=d.get("website"), market_cap=d.get("mktCap"), beta=d.get("beta"),
+                        hi52=hi, lo52=lo, price=d.get("price"), price_ccy=d.get("currency"))
+    except Exception:
+        return None
+    return None
+
+def fetch_fundamentals(ticker, n_years=5, fmp_key=None):
     import yfinance as yf
     t = yf.Ticker(ticker)
     inc, bal, cf = t.income_stmt, t.balance_sheet, t.cashflow
@@ -99,7 +121,7 @@ def fetch_fundamentals(ticker, n_years=5):
              if _series(df, names) is not None else data["missing"].append(f"{tag}:{k}"))
         data.update(block)
 
-    name, currency, dps, profile = ticker, "EUR", np.nan, {}
+    name, currency, dps, profile, price_ccy = ticker, "EUR", np.nan, {}, None
 
     # robuster Kurs: fast_info -> history -> info
     price = np.nan
@@ -111,6 +133,7 @@ def fetch_fundamentals(ticker, n_years=5):
         if (not price or np.isnan(price)):
             try: price = float(fi["lastPrice"])
             except Exception: pass
+        price_ccy = getattr(fi, "currency", None) or price_ccy
     except Exception:
         pass
     if not price or np.isnan(price):
@@ -129,6 +152,7 @@ def fetch_fundamentals(ticker, n_years=5):
     if info:
         name = info.get("longName") or info.get("shortName") or ticker
         currency = info.get("financialCurrency") or info.get("currency") or "EUR"
+        price_ccy = info.get("currency") or price_ccy
         if not price or np.isnan(price):
             price = info.get("currentPrice") or info.get("regularMarketPrice") or np.nan
     profile = dict(summary=info.get("longBusinessSummary"), sector=info.get("sector"),
@@ -141,6 +165,17 @@ def fetch_fundamentals(ticker, n_years=5):
                    target_low=info.get("targetLowPrice"), target_median=info.get("targetMedianPrice"),
                    n_analysts=info.get("numberOfAnalystOpinions"),
                    rec_key=info.get("recommendationKey"), rec_mean=info.get("recommendationMean"))
+
+    # optionaler FMP-Fallback (zuverlaessige Beschreibung/Profil + Kurs)
+    if fmp_key:
+        fp = _fmp_profile(ticker, fmp_key)
+        if fp:
+            for kk in ("summary", "sector", "industry", "country", "city", "employees",
+                       "website", "market_cap", "beta", "hi52", "lo52"):
+                if fp.get(kk): profile[kk] = fp[kk]
+            if (not price or np.isnan(price)) and fp.get("price"): price = float(fp["price"])
+            if fp.get("price_ccy"): price_ccy = fp["price_ccy"]
+
     try:
         div = t.dividends
         if div is not None and not div.empty and years:
@@ -149,7 +184,7 @@ def fetch_fundamentals(ticker, n_years=5):
         pass
     valid_price = price and not (isinstance(price, float) and np.isnan(price))
     data.update(name=name, currency=currency, price=float(price) if valid_price else np.nan,
-                dps=dps, profile=profile)
+                dps=dps, profile=profile, price_ccy=price_ccy or currency)
     return data
 
 # ---------------------------------------------------------------- scoring
@@ -275,6 +310,7 @@ def compute(data, wacc=0.08, growth=None, terminal=0.025,
                   net_debt=net_debt, shares=shares)
 
     return dict(ticker=data["ticker"], name=data.get("name"), currency=data.get("currency"),
+                price_ccy=data.get("price_ccy") or data.get("currency"),
                 years=data["years"], financials=fin, ratios=rat, latest=L, multiples=mult,
                 dcf=dcf, reverse_growth=rev_g, scores=sc, weights=WEIGHTS, series=series,
                 conviction=conv, verdict=verdict,
