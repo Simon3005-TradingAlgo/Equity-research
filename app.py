@@ -17,6 +17,7 @@ from plotly.subplots import make_subplots
 import equity_engine as eng
 import report
 import excel_report
+from holt_reverse_dcf import FirmInputs, value_firm, implied_expectation
 
 st.set_page_config(page_title="Equity Research Dashboard", layout="wide")
 st.markdown("<style>#MainMenu{visibility:hidden}footer{visibility:hidden}"
@@ -564,6 +565,89 @@ with t_val:
     st.caption("Reverse-DCF (einstufige Naeherung): der aktuelle EV preist ein Dauerwachstum von rund "
                f"{f_pct(main['reverse_growth'])} ein. Blended = Median der oben verfuegbaren Modelle, "
                "bewusst robust gegen Ausreisser.")
+
+    # ---------------------------------------------------- HOLT: Economic Return & Market-Implied CFROI
+    st.divider()
+    st.markdown("**HOLT-Logik: oekonomische Rendite, Fade & markt-implizite CFROI**")
+
+    roic_arr = row(main, "ROIC")
+    invcap_arr = frow(main, "Inv. Kapital")
+    invcap_arr = invcap_arr * eng.MM if invcap_arr is not None else None
+    cfroi0 = float(roic_arr[-1]) if roic_arr is not None and not np.isnan(roic_arr[-1]) else np.nan
+    gi0 = float(invcap_arr[-1]) if invcap_arr is not None and not np.isnan(invcap_arr[-1]) else np.nan
+
+    if np.isnan(cfroi0) or np.isnan(gi0) or gi0 <= 0:
+        st.info("HOLT-Bewertung nicht verfuegbar: ROIC oder investiertes Kapital fehlen "
+                "bzw. sind nicht positiv. (Bei Net-Cash-Bilanzen kann das investierte "
+                "Kapital <= 0 werden.)")
+    else:
+        # Asset-Growth = CAGR des investierten Kapitals (Fallback: Umsatz-CAGR)
+        ic = invcap_arr[~np.isnan(invcap_arr)]
+        if len(ic) >= 2 and ic[0] > 0 and ic[-1] > 0:
+            g_assets = (ic[-1] / ic[0]) ** (1 / (len(ic) - 1)) - 1
+        else:
+            g_assets = main["headline"]["rev_cagr"]
+        g_assets = float(np.clip(g_assets if not np.isnan(g_assets) else 0.04, -0.05, 0.20))
+
+        hc = st.columns(3)
+        moat = hc[0].slider("Permanenter Moat-Spread (Terminal-CFROI ueber WACC)",
+                            0.0, 0.06, 0.0, 0.005, format="%.3f", key="holt_moat",
+                            help="0 % = volle Fade auf die WACC (HOLT-Default). Hoehere Werte "
+                                 "lassen einen dauerhaften Renditevorsprung zu.")
+        h_years = hc[1].slider("Fade-Horizont (Jahre)", 5, 15, int(v_years), key="holt_h")
+        fade_kind = hc[2].selectbox("Fade-Form", ["linear", "exponential"], key="holt_fade")
+
+        cfroi_term = min(v_wacc + moat, cfroi0)          # nie ueber das heutige Niveau
+        g_term = float(min(v_term, v_wacc - 0.005))      # < WACC erzwingen
+
+        try:
+            f_holt = FirmInputs(
+                gross_investment=gi0, cfroi=cfroi0, asset_growth=g_assets,
+                discount_rate=v_wacc, net_debt=nd_abs, shares_out=shares,
+                horizon=int(h_years), cfroi_terminal=cfroi_term,
+                growth_terminal=g_term, fade=fade_kind,
+            )
+            val_h = value_firm(f_holt)
+
+            roic_hist = pd.Series(roic_arr, index=main["years"]).dropna()
+            imp = None
+            if price and not np.isnan(price):
+                try:
+                    imp = implied_expectation(f_holt, market_price=price,
+                                              target="cfroi_terminal", history=roic_hist)
+                except ValueError:
+                    imp = None
+
+            k = st.columns(4)
+            k[0].metric("Warranted Price (HOLT-economic)", f_cur(val_h.warranted_price),
+                        f"{val_h.upside_vs(price)*100:+.0f}% vs Kurs"
+                        if (price and not np.isnan(price)) else None)
+            k[1].metric("Aktuelle CFROI (=ROIC)", f_pct(cfroi0))
+            k[2].metric("Spread CFROI - WACC", f_pct(cfroi0 - v_wacc))
+            if imp is not None:
+                k[3].metric("Markt-implizite Terminal-CFROI", f_pct(imp.implied_value),
+                            f"{imp.vs_history_max*100:+.0f} pp vs. Bestwert"
+                            if imp.vs_history_max is not None else None)
+
+            # PV-Komposition: explizite Jahre + Terminalwert
+            pj = val_h.projection
+            labels = [f"J{int(y)}" for y in pj["year"]] + ["Terminal"]
+            vals = list(pj["pv_fcf"] / eng.MM) + [val_h.pv_terminal / eng.MM]
+            cols = [NAVY] * len(pj) + [TEAL]
+            fig_h = go.Figure(go.Bar(x=labels, y=vals, marker_color=cols))
+            st.plotly_chart(_layout(fig_h, h=300,
+                            title="HOLT-Barwertkomposition: oekonomische FCFF + Terminalwert (Mio.)",
+                            legend=False), use_container_width=True)
+
+            if imp is not None:
+                st.caption(f"**Gruener Punkt:** Der heutige Kurs preist eine *terminale* CFROI von "
+                           f"rund **{f_pct(imp.implied_value)}** ein - {imp.plausibility()} "
+                           f"Vergleich: DCF-Fair-Value (reported FCF) {f_cur(h['fair_value'])}, "
+                           f"HOLT-economic {f_cur(val_h.warranted_price)}. Die Differenz ist der im "
+                           f"Kurs eingepreiste *dauerhafte* Renditevorsprung - genau die Frage, die "
+                           f"ein reiner FCF-DCF nicht stellt.")
+        except Exception as e:
+            st.info(f"HOLT-Bewertung uebersprungen: {e}")
 
     # Normalisierung (Erholungsszenario) - branchenueblicher Weg bei Verlust-/Tiefpunkt-Jahren
     rev_l = frow(main, "Umsatz")
